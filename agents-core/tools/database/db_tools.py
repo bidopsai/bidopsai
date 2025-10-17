@@ -484,6 +484,59 @@ async def update_agent_task(
     return dict(row)
 
 
+@tool
+async def reset_agent_tasks(
+    workflow_execution_id: str,
+    agent_names: List[str],
+    reset_by: str
+) -> List[Dict[str, Any]]:
+    """
+    Reset agent tasks back to OPEN status for retry.
+    
+    This is used when validation fails (compliance/QA) and we need to
+    re-run certain agent tasks. The supervisor calls this to reset
+    the DB state before routing back to the failed agent.
+    
+    Args:
+        workflow_execution_id: Workflow execution ID
+        agent_names: List of agent names to reset (e.g., ["content", "compliance", "qa"])
+        reset_by: User ID who triggered the reset
+        
+    Returns:
+        List of reset agent tasks
+    """
+    db = get_database_manager()
+    
+    query = """
+        UPDATE agent_tasks
+        SET
+            status = 'OPEN',
+            handled_by = NULL,
+            completed_by = NULL,
+            started_at = NULL,
+            completed_at = NULL,
+            output_data = NULL,
+            error_message = NULL,
+            error_log = NULL,
+            execution_time_seconds = NULL
+        WHERE workflow_execution_id = $1
+        AND agent = ANY($2)
+        RETURNING *
+    """
+    
+    rows = await db.fetch_all(
+        query,
+        UUID(workflow_execution_id),
+        agent_names
+    )
+    
+    logger.info(
+        f"Reset {len(rows)} agent tasks for workflow {workflow_execution_id}: {agent_names}"
+    )
+    
+    return [dict(row) for row in rows]
+
+
 # ==============================================================================
 # ARTIFACT TOOLS
 # ==============================================================================

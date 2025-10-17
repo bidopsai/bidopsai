@@ -39,7 +39,8 @@ from tools.database.db_tools import (
     update_workflow_execution,
     update_agent_task,
     get_next_incomplete_task,
-    update_project
+    update_project,
+    reset_agent_tasks
 )
 from tools.storage.artifact_export import ArtifactExporter
 
@@ -185,186 +186,231 @@ async def _invoke_agent_with_context(
 
 async def supervisor_node(state: WorkflowGraphState) -> WorkflowGraphState:
     """
-    Supervisor orchestrator node - analyzes state and decides next action.
+    DATABASE-DRIVEN Supervisor orchestrator node.
     
-    This is the central orchestrator that:
-    1. Analyzes completed tasks and current workflow state
-    2. Determines the next appropriate action/node
-    3. Handles feedback loops and retries
-    4. Manages workflow progression
+    **CRITICAL DESIGN**: This supervisor is DB-centric, not state-centric.
+    All routing decisions are based on querying the database using tools,
+    following the mermaid diagram (lines 1166-1209).
     
-    Decision Logic:
-    - First call: Initialize workflow
-    - After initialize: Start with parser
-    - After parser: Move to analysis
-    - After analysis: Await user feedback
-    - After feedback: Decide reparse/reanalyze/proceed
-    - After content: Check compliance
-    - After compliance: If passed, QA; else retry content
-    - After QA: If passed, await review; else retry content
-    - After review: If approved, export; else retry content
-    - After export: Await comms permission
-    - After comms decision: If yes, run comms; else await submission
-    - After comms: Await submission permission
-    - After submission decision: If yes, run submission; else complete
-    - After submission: Complete workflow
+    Flow:
+    1. Check if workflow initialized (workflow_execution_id exists)
+    2. If not initialized → route to "initialize"
+    3. If initialized → call get_next_incomplete_task() tool to query DB
+    4. Based on DB response → route to appropriate agent node
+    5. Handle special cases (validation failures, user feedback)
     
     Args:
         state: Current workflow graph state
         
     Returns:
-        Updated state with next_node decision
+        Updated state with next_node decision in task_outputs
     """
     log_agent_action(
         agent_name=_agent_name,
-        action="supervisor_analyzing_state",
+        action="supervisor_analyzing_db_state",
         details={
             "workflow_id": str(state.workflow_execution_id) if state.workflow_execution_id else "not_initialized",
-            "completed_tasks": state.completed_tasks,
-            "current_status": state.current_status
+            "project_id": str(state.project_id),
+            "user_id": str(state.user_id)
         }
     )
     
-    # Determine next node based on workflow state
     next_node = None
     reason = ""
     
-    # Check if workflow needs initialization
+    # Step 1: Check if workflow needs initialization
     if not state.workflow_execution_id:
         next_node = "initialize"
-        reason = "Workflow not initialized yet"
-    
-    # After initialization, start parser
-    elif "initialize" in state.completed_tasks and "parser" not in state.completed_tasks:
-        next_node = "parser"
-        reason = "Workflow initialized, starting parser"
-    
-    # After parser, run analysis
-    elif "parser" in state.completed_tasks and "analysis" not in state.completed_tasks:
-        next_node = "analysis"
-        reason = "Parser completed, starting analysis"
-    
-    # After analysis, await feedback
-    elif "analysis" in state.completed_tasks and not state.awaiting_user_feedback:
-        next_node = "await_analysis_feedback"
-        reason = "Analysis completed, awaiting user feedback"
-    
-    # After feedback, check intent
-    elif state.awaiting_user_feedback and "await_analysis_feedback" in state.completed_tasks:
-        feedback_output = state.task_outputs.get("await_analysis_feedback", {})
-        intent = feedback_output.get("intent", "proceed")
+        reason = "Workflow not initialized - creating WorkflowExecution and AgentTasks in DB"
         
-        if intent == "reparse":
-            # Reset tasks for reparse
-            state.completed_tasks = [t for t in state.completed_tasks if t not in ["parser", "analysis", "await_analysis_feedback"]]
-            next_node = "parser"
-            reason = "User requested reparse"
-        elif intent == "reanalyze":
-            # Reset analysis task
-            state.completed_tasks = [t for t in state.completed_tasks if t not in ["analysis", "await_analysis_feedback"]]
-            next_node = "analysis"
-            reason = "User requested reanalysis"
-        else:
-            next_node = "content"
-            reason = "User approved analysis, proceeding to content"
-            state.awaiting_user_feedback = False
-    
-    # After content, check compliance
-    elif "content" in state.completed_tasks and "compliance" not in state.completed_tasks:
-        next_node = "compliance"
-        reason = "Content completed, checking compliance"
-    
-    # After compliance, check if passed
-    elif "compliance" in state.completed_tasks:
-        compliance_output = state.task_outputs.get("compliance", {})
-        is_compliant = compliance_output.get("is_compliant", False)
+        state.task_outputs["supervisor"] = {
+            "next_node": next_node,
+            "reason": reason,
+            "timestamp": datetime.utcnow().isoformat()
+        }
         
-        if not is_compliant and "qa" not in state.completed_tasks:
-            # Reset content and compliance for retry
-            state.completed_tasks = [t for t in state.completed_tasks if t not in ["content", "compliance"]]
-            next_node = "content"
-            reason = "Compliance failed, retrying content"
-        elif "qa" not in state.completed_tasks:
-            next_node = "qa"
-            reason = "Compliance passed, starting QA"
-    
-    # After QA, check if passed
-    elif "qa" in state.completed_tasks and "await_artifact_review" not in state.completed_tasks:
-        qa_output = state.task_outputs.get("qa", {})
-        overall_status = qa_output.get("overall_status", "")
+        log_agent_action(
+            agent_name=_agent_name,
+            action="supervisor_decision",
+            details={"next_node": next_node, "reason": reason}
+        )
         
-        if overall_status != "complete":
-            # Reset content, compliance, QA for retry
-            state.completed_tasks = [t for t in state.completed_tasks if t not in ["content", "compliance", "qa"]]
-            next_node = "content"
-            reason = "QA failed, retrying content"
-        else:
-            next_node = "await_artifact_review"
-            reason = "QA passed, awaiting artifact review"
+        return state
     
-    # After artifact review, check if approved
-    elif "await_artifact_review" in state.completed_tasks and not state.artifact_export_completed:
-        review_output = state.task_outputs.get("await_artifact_review", {})
-        approved = review_output.get("approved", False)
+    # Step 2: Query DB for next incomplete task
+    try:
+        # Call get_next_incomplete_task tool (no agent_name parameter)
+        next_task = await get_next_incomplete_task(
+            workflow_execution_id=str(state.workflow_execution_id)
+        )
         
-        if not approved:
-            # Reset content pipeline for retry
-            state.completed_tasks = [t for t in state.completed_tasks if t not in ["content", "compliance", "qa", "await_artifact_review"]]
-            next_node = "content"
-            reason = "Artifacts not approved, retrying content"
-        else:
-            next_node = "export_artifacts"
-            reason = "Artifacts approved, exporting to S3"
-    
-    # After export, await comms permission
-    elif state.artifact_export_completed and "await_comms_permission" not in state.completed_tasks:
-        next_node = "await_comms_permission"
-        reason = "Artifacts exported, awaiting comms permission"
-    
-    # After comms permission, decide
-    elif "await_comms_permission" in state.completed_tasks and "comms" not in state.completed_tasks:
-        permission_output = state.task_outputs.get("await_comms_permission", {})
-        approved = permission_output.get("approved", False)
-        
-        if approved:
-            next_node = "comms"
-            reason = "Comms approved, sending notifications"
-        else:
-            next_node = "await_submission_permission"
-            reason = "Comms skipped, awaiting submission permission"
-    
-    # After comms, await submission permission
-    elif "comms" in state.completed_tasks and "await_submission_permission" not in state.completed_tasks:
-        next_node = "await_submission_permission"
-        reason = "Comms completed, awaiting submission permission"
-    
-    # After submission permission, decide
-    elif "await_submission_permission" in state.completed_tasks and "submission" not in state.completed_tasks:
-        permission_output = state.task_outputs.get("await_submission_permission", {})
-        approved = permission_output.get("approved", False)
-        
-        if approved:
-            next_node = "submission"
-            reason = "Submission approved, sending bid"
-        else:
+        if not next_task:
+            # No more incomplete tasks → workflow complete
             next_node = "complete"
-            reason = "Submission skipped, completing workflow"
+            reason = "All agent tasks completed in DB"
+        
+        else:
+            # Route based on DB task name
+            agent_name = next_task.get("agent", "")
+            task_status = next_task.get("status", "")
+            
+            # Map agent names to node names
+            agent_to_node_map = {
+                "parser": "parser",
+                "analysis": "analysis",
+                "content": "content",
+                "compliance": "compliance",
+                "qa": "qa",
+                "comms": "comms",
+                "submission": "submission"
+            }
+            
+            if agent_name in agent_to_node_map:
+                next_node = agent_to_node_map[agent_name]
+                reason = f"DB shows next incomplete task: {agent_name} (status: {task_status})"
+            
+            else:
+                # Unknown agent name - log error and complete
+                log_agent_action(
+                    agent_name=_agent_name,
+                    action="supervisor_error",
+                    details={
+                        "error": f"Unknown agent name from DB: {agent_name}",
+                        "task": next_task
+                    }
+                )
+                next_node = "complete"
+                reason = f"Unknown agent task '{agent_name}' - completing workflow"
+        
+        # Handle special awaiting nodes based on previous task completion
+        # Check if we need user feedback after analysis
+        if next_node == "content" and "analysis" in state.completed_tasks:
+            # First time moving to content → await analysis feedback
+            if not state.awaiting_user_feedback:
+                next_node = "await_analysis_feedback"
+                reason = "Analysis completed, awaiting user feedback before content"
+        
+        # Check if we need artifact review after QA
+        elif next_node == "comms" and "qa" in state.completed_tasks:
+            # First time moving to comms → await artifact review
+            if not state.artifact_export_completed:
+                next_node = "await_artifact_review"
+                reason = "QA completed, awaiting artifact review before export"
+        
+        # Handle feedback loop decisions (user-driven)
+        if state.awaiting_user_feedback and "await_analysis_feedback" in state.completed_tasks:
+            feedback_output = state.task_outputs.get("await_analysis_feedback", {})
+            intent = feedback_output.get("intent", "proceed")
+            
+            if intent == "reparse":
+                # Reset parser and analysis tasks in DB
+                await reset_agent_tasks(
+                    workflow_execution_id=str(state.workflow_execution_id),
+                    agent_names=["parser", "analysis"],
+                    reset_by=str(state.user_id)
+                )
+                next_node = "parser"
+                reason = "User feedback: reparse requested - reset parser+analysis tasks in DB"
+                state.awaiting_user_feedback = False
+                
+                log_agent_action(
+                    agent_name=_agent_name,
+                    action="user_feedback_reparse",
+                    details={
+                        "workflow_id": str(state.workflow_execution_id),
+                        "reset_agents": ["parser", "analysis"]
+                    }
+                )
+            
+            elif intent == "reanalyze":
+                # Reset analysis task in DB
+                await reset_agent_tasks(
+                    workflow_execution_id=str(state.workflow_execution_id),
+                    agent_names=["analysis"],
+                    reset_by=str(state.user_id)
+                )
+                next_node = "analysis"
+                reason = "User feedback: reanalysis requested - reset analysis task in DB"
+                state.awaiting_user_feedback = False
+                
+                log_agent_action(
+                    agent_name=_agent_name,
+                    action="user_feedback_reanalyze",
+                    details={
+                        "workflow_id": str(state.workflow_execution_id),
+                        "reset_agents": ["analysis"]
+                    }
+                )
+            
+            else:
+                # Proceed to content
+                next_node = "content"
+                reason = "User feedback: approved - proceeding to content"
+                state.awaiting_user_feedback = False
+        
+        # Handle validation failures (from agent outputs)
+        # Compliance failed → reset content and compliance tasks in DB
+        if "compliance" in state.completed_tasks:
+            compliance_output = state.task_outputs.get("compliance", {})
+            if not compliance_output.get("is_compliant", True):
+                # Reset DB tasks for content and compliance
+                await reset_agent_tasks(
+                    workflow_execution_id=str(state.workflow_execution_id),
+                    agent_names=["content", "compliance"],
+                    reset_by=str(state.user_id)
+                )
+                next_node = "content"
+                reason = "Compliance failed - reset content+compliance tasks in DB"
+                
+                log_agent_action(
+                    agent_name=_agent_name,
+                    action="compliance_failed_reset",
+                    details={
+                        "workflow_id": str(state.workflow_execution_id),
+                        "reset_agents": ["content", "compliance"]
+                    }
+                )
+        
+        # QA failed → reset content, compliance, QA tasks in DB
+        if "qa" in state.completed_tasks:
+            qa_output = state.task_outputs.get("qa", {})
+            if qa_output.get("overall_status") != "complete":
+                # Reset DB tasks for content, compliance, and QA
+                await reset_agent_tasks(
+                    workflow_execution_id=str(state.workflow_execution_id),
+                    agent_names=["content", "compliance", "qa"],
+                    reset_by=str(state.user_id)
+                )
+                next_node = "content"
+                reason = "QA failed - reset content+compliance+QA tasks in DB"
+                
+                log_agent_action(
+                    agent_name=_agent_name,
+                    action="qa_failed_reset",
+                    details={
+                        "workflow_id": str(state.workflow_execution_id),
+                        "reset_agents": ["content", "compliance", "qa"]
+                    }
+                )
     
-    # After submission, complete
-    elif "submission" in state.completed_tasks:
+    except Exception as e:
+        log_agent_action(
+            agent_name=_agent_name,
+            action="supervisor_error",
+            details={
+                "error": str(e),
+                "workflow_id": str(state.workflow_execution_id)
+            }
+        )
         next_node = "complete"
-        reason = "Submission completed, completing workflow"
-    
-    # Default fallback
-    else:
-        next_node = "complete"
-        reason = "All tasks completed or error state, completing workflow"
+        reason = f"Error querying DB for next task: {str(e)}"
     
     # Store decision in state
     state.task_outputs["supervisor"] = {
         "next_node": next_node,
         "reason": reason,
-        "timestamp": datetime.utcnow().isoformat()
+        "timestamp": datetime.utcnow().isoformat(),
+        "db_driven": True  # Flag indicating this is DB-driven routing
     }
     
     log_agent_action(
@@ -373,7 +419,7 @@ async def supervisor_node(state: WorkflowGraphState) -> WorkflowGraphState:
         details={
             "next_node": next_node,
             "reason": reason,
-            "completed_tasks": state.completed_tasks
+            "workflow_id": str(state.workflow_execution_id)
         }
     )
     
