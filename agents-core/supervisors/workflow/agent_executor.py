@@ -175,7 +175,7 @@ async def invoke_workflow(
     context: RequestContext
 ):
     """
-    Main agent invocation entrypoint (AgentCore native).
+    Main agent invocation entrypoint (AgentCore native with streaming).
     
     Receives workflow execution requests and orchestrates the complete
     bid processing workflow using Strands StateGraph pattern.
@@ -199,16 +199,10 @@ async def invoke_workflow(
             - metadata: Additional context
     
     Yields:
-        Dict events with:
-        - type: Event type (node_completed, awaiting_feedback, etc.)
+        String events (SSE format) with JSON data containing:
+        - type: Event type (node_completed, awaiting_feedback, workflow_complete, etc.)
         - data: Event-specific data
         - timestamp: ISO timestamp
-        
-        Final event includes:
-        - workflow_execution_id: UUID
-        - status: Current workflow status
-        - message: Status message
-        - awaiting_feedback: Whether workflow is awaiting user input
     
     Raises:
         AgentError: On validation or execution errors
@@ -235,11 +229,23 @@ async def invoke_workflow(
         if request.user_input:
             await _persist_user_input(request)
         
-        # Execute workflow with streaming - yield events in real-time
+        # Yield start event - RAW dict, NOT JSON string
+        yield {
+            "type": "workflow_started",
+            "data": {
+                "project_id": str(request.project_id),
+                "session_id": request.session_id,
+                "start": request.start
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
+        # Execute workflow with streaming - yield RAW event dicts
         async for event in _execute_workflow_with_streaming(
             request=request,
             context=context
         ):
+            # Yield raw event dict - BedrockAgentCoreApp handles JSON serialization
             yield event
         
     except AgentError as e:
@@ -254,6 +260,16 @@ async def invoke_workflow(
             level="error"
         )
         
+        # Yield error event
+        yield json.dumps({
+            "type": "error",
+            "data": {
+                "error_code": e.code,
+                "error_message": str(e),
+                "severity": e.severity
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        })
         raise
         
     except Exception as e:
@@ -263,6 +279,15 @@ async def invoke_workflow(
             details={"error": str(e)},
             level="error"
         )
+        
+        # Yield error event - RAW dict
+        yield {
+            "type": "error",
+            "data": {
+                "error_message": f"Internal server error: {str(e)}"
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }
         
         raise AgentError(
             message=f"Internal server error: {str(e)}",
@@ -352,7 +377,7 @@ async def _persist_user_input(request: InvocationRequest) -> None:
 async def _execute_workflow_with_streaming(
     request: InvocationRequest,
     context: RequestContext
-) -> Dict[str, Any]:
+):
     """
     Execute workflow using Strands GraphBuilder with native AgentCore streaming.
     
@@ -364,13 +389,11 @@ async def _execute_workflow_with_streaming(
         request: Invocation request
         context: RequestContext from AgentCore
         
-    Returns:
-        Execution result dictionary with:
-        - workflow_execution_id: UUID
-        - status: Current status
-        - awaiting_feedback: Boolean
-        - message: Status message
-        - events: Generator of streaming events
+    Yields:
+        Dictionary events with:
+        - type: Event type (node_completed, awaiting_feedback, workflow_complete, error)
+        - data: Event-specific data
+        - timestamp: ISO timestamp
     """
     log_agent_action(
         agent_name="workflow_executor",
@@ -408,7 +431,6 @@ async def _execute_workflow_with_streaming(
         
         # Execute with streaming using native AgentCore
         final_state = None
-        events = []
         
         # Stream graph execution using agent.stream_async()
         async for event in graph.astream(state, config):
@@ -419,15 +441,18 @@ async def _execute_workflow_with_streaming(
                     if isinstance(node_output, WorkflowGraphState):
                         final_state = node_output
                     
-                    # Collect event
+                    # Yield streaming event
                     event_data = {
                         "type": "node_completed",
-                        "node": node_name,
-                        "current_agent": final_state.current_agent if final_state else None,
-                        "progress": final_state.calculate_progress() if final_state else 0,
+                        "data": {
+                            "node": node_name,
+                            "current_agent": final_state.current_agent if final_state else None,
+                            "progress": final_state.calculate_progress() if final_state else 0,
+                            "workflow_id": str(final_state.workflow_execution_id) if final_state else None
+                        },
                         "timestamp": datetime.utcnow().isoformat()
                     }
-                    events.append(event_data)
+                    yield event_data
                     
                     # Persist event to conversation
                     await add_sse_event(
@@ -456,7 +481,17 @@ async def _execute_workflow_with_streaming(
                         "reason": "awaiting_user_feedback"
                     }
                 )
-                # Graph interrupted - break and return current state
+                
+                # Yield awaiting feedback event
+                yield {
+                    "type": "awaiting_feedback",
+                    "data": {
+                        "workflow_id": str(final_state.workflow_execution_id),
+                        "message": "Workflow paused - awaiting user feedback"
+                    },
+                    "timestamp": datetime.utcnow().isoformat()
+                }
+                # Graph interrupted - break
                 break
         
         # Record workflow duration metric
@@ -480,16 +515,18 @@ async def _execute_workflow_with_streaming(
                     "duration_seconds": workflow_duration
                 }
             )
-        
-        # Return execution result
-        return {
-            "workflow_execution_id": str(final_state.workflow_execution_id),
-            "status": final_state.current_status,
-            "awaiting_feedback": final_state.awaiting_user_feedback,
-            "message": _get_status_message(final_state),
-            "events": events,  # AgentCore will handle streaming
-            "timestamp": datetime.utcnow().isoformat()
-        }
+            
+            # Yield completion event
+            yield {
+                "type": "workflow_complete",
+                "data": {
+                    "workflow_execution_id": str(final_state.workflow_execution_id),
+                    "status": final_state.current_status,
+                    "message": _get_status_message(final_state),
+                    "duration_seconds": workflow_duration
+                },
+                "timestamp": datetime.utcnow().isoformat()
+            }
         
     except Exception as e:
         # Record error metric
@@ -518,6 +555,16 @@ async def _execute_workflow_with_streaming(
             },
             level="error"
         )
+        
+        # Yield error event
+        yield {
+            "type": "error",
+            "data": {
+                "error_message": f"Workflow execution failed: {str(e)}",
+                "error_code": ErrorCode.EXECUTION_ERROR
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }
         
         raise AgentError(
             message=f"Workflow execution failed: {str(e)}",

@@ -298,6 +298,17 @@ async def invoke_ai_assistant(
         final_agent = None
         final_metadata = {}
         
+        # Yield start event - RAW dict, NOT JSON string
+        yield {
+            "type": "assistant_started",
+            "data": {
+                "user_id": str(request.user_id),
+                "session_id": request.session_id,
+                "conversation_id": str(conversation_id)
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        
         async for event in _execute_ai_assistant_with_streaming(
             user_query=user_query,
             conversation_context=conversation_context,
@@ -305,7 +316,7 @@ async def invoke_ai_assistant(
             request=request,
             context=context
         ):
-            # Yield each event immediately to AgentCore
+            # Yield raw event dict - BedrockAgentCoreApp handles JSON serialization
             yield event
             
             # Capture final response for persistence
@@ -347,6 +358,17 @@ async def invoke_ai_assistant(
             },
             level="error"
         )
+        
+        # Yield error event - RAW dict
+        yield {
+            "type": "error",
+            "data": {
+                "error_code": e.code,
+                "error_message": str(e),
+                "severity": e.severity
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }
         raise
         
     except Exception as e:
@@ -359,6 +381,15 @@ async def invoke_ai_assistant(
             },
             level="error"
         )
+        
+        # Yield error event - RAW dict
+        yield {
+            "type": "error",
+            "data": {
+                "error_message": f"AI Assistant error: {str(e)}"
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }
         
         raise AgentError(
             message=f"AI Assistant error: {str(e)}",
