@@ -157,47 +157,11 @@ async def shutdown_event():
 
 
 # ========================================
-# Health Check Endpoint
+# Health Check - Automatically provided by BedrockAgentCoreApp
 # ========================================
-
-@app.route("/health", methods=["GET"])
-async def health_check():
-    """
-    Health check endpoint.
-    
-    Checks:
-    - Database connectivity
-    - Memory manager status
-    
-    Returns:
-        JSON with health status and service checks
-    """
-    try:
-        # Check database
-        db_healthy = db_pool.is_initialized
-        
-        # Check memory manager
-        memory_manager = get_memory_manager()
-        memory_healthy = memory_manager is not None
-        
-        all_healthy = db_healthy and memory_healthy
-        
-        return {
-            "status": "healthy" if all_healthy else "unhealthy",
-            "timestamp": datetime.utcnow().isoformat(),
-            "services": {
-                "database": "up" if db_healthy else "down",
-                "memory": "up" if memory_healthy else "down"
-            },
-            "mode": "workflow"
-        }
-        
-    except Exception as e:
-        return {
-            "status": "unhealthy",
-            "error": str(e),
-            "timestamp": datetime.utcnow().isoformat()
-        }
+# The /ping endpoint is automatically created by BedrockAgentCoreApp
+# Returns: {"status": "Healthy"} or {"status": "HealthyBusy"}
+# No custom health endpoint needed - AgentCore Runtime uses /ping
 
 
 # ========================================
@@ -608,108 +572,6 @@ def _create_initial_state(request: InvocationRequest) -> WorkflowGraphState:
     )
     
     return initial_state
-
-
-async def _load_and_update_state(
-    request: InvocationRequest,
-    context: RequestContext
-) -> WorkflowGraphState:
-    """
-    Load existing state from AgentCore Memory and update with user input.
-    
-    Uses RequestContext.session_id for state persistence across invocations,
-    enabling proper workflow resumption and multi-turn interactions.
-    
-    Args:
-        request: Invocation request with session_id
-        context: RequestContext from AgentCore
-        
-    Returns:
-        Updated WorkflowGraphState ready for resumption
-        
-    Raises:
-        AgentError: If state not found in memory
-    """
-    log_agent_action(
-        agent_name="workflow_executor",
-        action="loading_state_from_memory",
-        details={
-            "session_id": request.session_id,
-            "context_session_id": context.session_id,
-            "user_id": str(request.user_id)
-        }
-    )
-    
-    try:
-        # Get compiled graph directly from builder
-        from supervisors.workflow.agent_builder import build_workflow_graph
-        graph = build_workflow_graph()
-        
-        # Load checkpoint state from graph (AgentCore Memory handles persistence)
-        config = {"configurable": {"thread_id": request.session_id}}
-        checkpoint = graph.get_state(config)
-        
-        if not checkpoint or not checkpoint.values:
-            raise AgentError(
-                message=f"No workflow found for session_id: {request.session_id}",
-                code=ErrorCode.WORKFLOW_NOT_FOUND,
-                severity=ErrorSeverity.MEDIUM
-            )
-        
-        # Extract state from checkpoint
-        state: WorkflowGraphState = checkpoint.values
-        
-        log_agent_action(
-            agent_name="workflow_executor",
-            action="state_loaded",
-            details={
-                "workflow_id": str(state.workflow_execution_id),
-                "current_agent": state.current_agent,
-                "completed_tasks": len(state.completed_tasks),
-                "source": "checkpoint"
-            }
-        )
-        
-        # Update state with user input
-        if request.user_input:
-            if request.user_input.chat:
-                state.user_feedback = request.user_input.chat
-                state.last_user_message = request.user_input.chat
-                state.feedback_intent = _analyze_feedback_intent(request.user_input.chat)
-            
-            if request.user_input.content_edits:
-                state.content_edits = request.user_input.content_edits
-            
-            # Clear awaiting flag so graph resumes
-            state.awaiting_user_feedback = False
-            state.last_updated_at = datetime.utcnow()
-            
-            log_agent_action(
-                agent_name="workflow_executor",
-                action="state_updated_with_feedback",
-                details={
-                    "workflow_id": str(state.workflow_execution_id),
-                    "feedback_intent": state.feedback_intent,
-                    "has_edits": len(state.content_edits) > 0
-                }
-            )
-        
-        return state
-        
-    except AgentError:
-        raise
-    except Exception as e:
-        log_agent_action(
-            agent_name="workflow_executor",
-            action="state_load_failed",
-            details={"error": str(e)},
-            level="error"
-        )
-        raise AgentError(
-            message=f"Failed to load workflow state: {str(e)}",
-            code=ErrorCode.MEMORY_ERROR,
-            severity=ErrorSeverity.HIGH
-        )
 
 
 async def _load_and_update_state(

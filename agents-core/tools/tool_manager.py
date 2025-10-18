@@ -290,24 +290,27 @@ class ToolManager:
             )
             ```
         """
-        # Validate MCP client names
+        # Filter to only valid MCP clients (may not be initialized yet in dev)
+        valid_clients = [c for c in mcp_clients if c in self._mcp_clients]
         invalid_clients = [c for c in mcp_clients if c not in self._mcp_clients]
-        if invalid_clients:
-            logger.warning(
-                f"Agent '{agent_name}': Invalid MCP client names: {invalid_clients}"
-            )
-            mcp_clients = [c for c in mcp_clients if c in self._mcp_clients]
         
-        # Store MCP configuration
+        if invalid_clients:
+            logger.debug(
+                f"Agent '{agent_name}': MCP clients not yet initialized: {invalid_clients} "
+                "(will be available once MCP servers start)"
+            )
+        
+        # Store MCP configuration (even if clients not initialized yet)
         config_key = f"{agent_name}_{mode}" if mode else agent_name
         self._agent_mcp_mappings[config_key] = {
-            "clients": mcp_clients,
+            "clients": mcp_clients,  # Store all, not just valid
             "mode": mode,
         }
         
         logger.info(
             f"Configured {len(mcp_clients)} MCP clients for agent '{agent_name}'"
             + (f" in mode '{mode}'" if mode else "")
+            + (f" ({len(valid_clients)} initialized)" if invalid_clients else "")
         )
     
     def configure_agent_tools(
@@ -318,21 +321,26 @@ class ToolManager:
         """
         Configure which tools an agent can use.
         
+        Note: This method stores tool names for agents. Tools decorated with @tool
+        from Strands are passed directly to agents and don't need to be registered
+        in ToolManager. Only custom tools that need ToolManager's execution wrapper
+        (retry logic, approval, etc.) should be registered via register_tool().
+        
         Args:
             agent_name: Name of the agent
-            tool_names: List of tool names available to agent
+            tool_names: List of tool names available to agent (includes Strands tools)
         """
-        # Validate tool names
-        invalid_tools = [t for t in tool_names if t not in self._tools]
-        if invalid_tools:
-            logger.warning(
-                f"Agent '{agent_name}': Invalid tool names: {invalid_tools}"
-            )
-            tool_names = [t for t in tool_names if t in self._tools]
-        
+        # Store all tool names (Strands tools + registered custom tools)
+        # We don't validate here because many tools are Strands-native
         self._agent_tool_mappings[agent_name] = set(tool_names)
+        
+        # Count registered vs unregistered (likely Strands) tools
+        registered_count = len([t for t in tool_names if t in self._tools])
+        strands_count = len(tool_names) - registered_count
+        
         logger.info(
-            f"Configured {len(tool_names)} tools for agent '{agent_name}'"
+            f"Configured {len(tool_names)} tools for agent '{agent_name}' "
+            f"({registered_count} registered + {strands_count} Strands-native)"
         )
     
     def get_agent_tools(
