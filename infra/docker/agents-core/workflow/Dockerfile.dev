@@ -55,9 +55,9 @@ EXPOSE 8001
 # Expose port for debugpy (optional)
 EXPOSE 5678
 
-# Health check
+# Health check - using AgentCore's built-in /ping endpoint
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:8001/health || exit 1
+    CMD curl -f http://localhost:8001/ping || exit 1
 
 # Run with uvicorn and hot-reload
 CMD ["uvicorn", "supervisors.workflow.agent_executor:app", \
