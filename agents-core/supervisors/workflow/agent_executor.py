@@ -40,7 +40,7 @@ from bedrock_agentcore import BedrockAgentCoreApp, RequestContext
 from pydantic import BaseModel, Field
 
 from core.database import init_database, close_database, db_pool
-from core.memory_manager import get_memory_manager
+from core.memory import get_memory_manager
 from core.conversation_manager import add_user_input, add_sse_event
 from core.config import get_config
 from core.error_handling import (
@@ -98,16 +98,8 @@ async def startup_event():
         # Initialize core services
         await init_database()  # Creates singleton database pool
         
-        # Initialize AgentCore Memory System
-        from core.agentcore_memory import initialize_agentcore_memory
-        memory_id = await initialize_agentcore_memory()
-        log_agent_action(
-            agent_name="workflow_executor",
-            action="agentcore_memory_initialized",
-            details={"memory_id": memory_id}
-        )
-        
-        get_memory_manager()  # Creates singleton memory manager for conversation persistence
+        # Initialize memory manager (AgentCore Memory integrated via Phase 4)
+        get_memory_manager()  # Creates singleton memory manager
         initialize_observability()  # Initialize LangFuse and OTEL
         
         # Initialize tool configuration
@@ -117,9 +109,8 @@ async def startup_event():
             agent_name="workflow_executor",
             action="startup_complete",
             details={
-                "services": ["database", "agentcore_memory", "memory_manager", "observability", "tools"],
-                "mode": "workflow",
-                "memory_id": memory_id
+                "services": ["database", "memory_manager", "observability", "tools"],
+                "mode": "workflow"
             }
         )
         
@@ -654,26 +645,121 @@ async def _load_and_update_state(
         from supervisors.workflow.agent_builder import build_workflow_graph
         graph = build_workflow_graph()
         
-        # Load checkpoint state from AgentCore Memory
+        # Load checkpoint state from graph (AgentCore Memory handles persistence)
         config = {"configurable": {"thread_id": request.session_id}}
         checkpoint = graph.get_state(config)
         
         if not checkpoint or not checkpoint.values:
-            # Try loading from session memory as fallback
-            state = await _load_state_from_session_memory(
-                session_id=request.session_id,
-                user_id=str(request.user_id)
+            raise AgentError(
+                message=f"No workflow found for session_id: {request.session_id}",
+                code=ErrorCode.WORKFLOW_NOT_FOUND,
+                severity=ErrorSeverity.MEDIUM
             )
+        
+        # Extract state from checkpoint
+        state: WorkflowGraphState = checkpoint.values
+        
+        log_agent_action(
+            agent_name="workflow_executor",
+            action="state_loaded",
+            details={
+                "workflow_id": str(state.workflow_execution_id),
+                "current_agent": state.current_agent,
+                "completed_tasks": len(state.completed_tasks),
+                "source": "checkpoint"
+            }
+        )
+        
+        # Update state with user input
+        if request.user_input:
+            if request.user_input.chat:
+                state.user_feedback = request.user_input.chat
+                state.last_user_message = request.user_input.chat
+                state.feedback_intent = _analyze_feedback_intent(request.user_input.chat)
             
-            if not state:
-                raise AgentError(
-                    message=f"No workflow found for session_id: {request.session_id}",
-                    code=ErrorCode.WORKFLOW_NOT_FOUND,
-                    severity=ErrorSeverity.MEDIUM
-                )
-        else:
-            # Extract state from checkpoint
-            state: WorkflowGraphState = checkpoint.values
+            if request.user_input.content_edits:
+                state.content_edits = request.user_input.content_edits
+            
+            # Clear awaiting flag so graph resumes
+            state.awaiting_user_feedback = False
+            state.last_updated_at = datetime.utcnow()
+            
+            log_agent_action(
+                agent_name="workflow_executor",
+                action="state_updated_with_feedback",
+                details={
+                    "workflow_id": str(state.workflow_execution_id),
+                    "feedback_intent": state.feedback_intent,
+                    "has_edits": len(state.content_edits) > 0
+                }
+            )
+        
+        return state
+        
+    except AgentError:
+        raise
+    except Exception as e:
+        log_agent_action(
+            agent_name="workflow_executor",
+            action="state_load_failed",
+            details={"error": str(e)},
+            level="error"
+        )
+        raise AgentError(
+            message=f"Failed to load workflow state: {str(e)}",
+            code=ErrorCode.MEMORY_ERROR,
+            severity=ErrorSeverity.HIGH
+        )
+
+
+async def _load_and_update_state(
+    request: InvocationRequest,
+    context: RequestContext
+) -> WorkflowGraphState:
+    """
+    Load existing state from AgentCore Memory and update with user input.
+    
+    Uses RequestContext.session_id for state persistence across invocations,
+    enabling proper workflow resumption and multi-turn interactions.
+    
+    Args:
+        request: Invocation request with session_id
+        context: RequestContext from AgentCore
+        
+    Returns:
+        Updated WorkflowGraphState ready for resumption
+        
+    Raises:
+        AgentError: If state not found in memory
+    """
+    log_agent_action(
+        agent_name="workflow_executor",
+        action="loading_state_from_memory",
+        details={
+            "session_id": request.session_id,
+            "context_session_id": context.session_id,
+            "user_id": str(request.user_id)
+        }
+    )
+    
+    try:
+        # Get compiled graph directly from builder
+        from supervisors.workflow.agent_builder import build_workflow_graph
+        graph = build_workflow_graph()
+        
+        # Load checkpoint state from graph (AgentCore Memory handles persistence)
+        config = {"configurable": {"thread_id": request.session_id}}
+        checkpoint = graph.get_state(config)
+        
+        if not checkpoint or not checkpoint.values:
+            raise AgentError(
+                message=f"No workflow found for session_id: {request.session_id}",
+                code=ErrorCode.WORKFLOW_NOT_FOUND,
+                severity=ErrorSeverity.MEDIUM
+            )
+        
+        # Extract state from checkpoint
+        state: WorkflowGraphState = checkpoint.values
         
         log_agent_action(
             agent_name="workflow_executor",
@@ -757,78 +843,6 @@ def _analyze_feedback_intent(feedback: str) -> str:
     
     # Default to proceed
     return "proceed"
-
-
-async def _load_state_from_session_memory(
-    session_id: str,
-    user_id: str
-) -> Optional[WorkflowGraphState]:
-    """
-    Load workflow state from session memory (fallback).
-    
-    Args:
-        session_id: Session ID
-        user_id: User ID
-    
-    Returns:
-        WorkflowGraphState or None
-    """
-    try:
-        from core.memory_manager import load_session_context
-        
-        session_data = await load_session_context(session_id, user_id)
-        
-        if session_data and "workflow_state" in session_data:
-            log_agent_action(
-                agent_name="workflow_executor",
-                action="state_loaded_from_session_memory",
-                details={"session_id": session_id}
-            )
-            
-            # Reconstruct state from session data
-            # This is a simplified version - in production, serialize/deserialize properly
-            return session_data["workflow_state"]
-        
-    except Exception as e:
-        logger.warning(f"Could not load state from session memory: {e}")
-    
-    return None
-
-
-async def _persist_state_to_session_memory(
-    session_id: str,
-    user_id: str,
-    state: WorkflowGraphState
-) -> None:
-    """
-    Persist workflow state to session memory.
-    
-    Args:
-        session_id: Session ID
-        user_id: User ID
-        state: Workflow state to persist
-    """
-    try:
-        from core.memory_manager import update_session_context
-        
-        await update_session_context(
-            session_id=session_id,
-            user_id=user_id,
-            workflow_state=state,
-            workflow_execution_id=str(state.workflow_execution_id),
-            current_agent=state.current_agent,
-            current_status=state.current_status,
-            last_updated=datetime.utcnow().isoformat()
-        )
-        
-        log_agent_action(
-            agent_name="workflow_executor",
-            action="state_persisted_to_session_memory",
-            details={"session_id": session_id}
-        )
-        
-    except Exception as e:
-        logger.warning(f"Could not persist state to session memory: {e}")
 
 
 def _get_status_message(state: WorkflowGraphState) -> str:

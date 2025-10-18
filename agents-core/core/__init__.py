@@ -33,16 +33,12 @@ from core.config import (
     AgentConfiguration
 )
 
-from core.memory_manager import (
-    get_memory_manager,
-    set_memory,
-    get_memory,
-    delete_memory,
-    clear_scope_memory,
+from core.memory import (
+    MemoryScope,
     MemoryType,
-    store_session_context,
-    load_session_context,
-    update_session_context
+    MemoryConfig,
+    MemoryManager,
+    get_memory_manager
 )
 
 from core.observability import (
@@ -92,16 +88,12 @@ __all__ = [
     "AppConfig",
     "AgentConfiguration",
     
-    # Memory
-    "get_memory_manager",
-    "set_memory",
-    "get_memory",
-    "delete_memory",
-    "clear_scope_memory",
+    # Memory (Phase 4 - AWS AgentCore Memory)
+    "MemoryScope",
     "MemoryType",
-    "store_session_context",
-    "load_session_context",
-    "update_session_context",
+    "MemoryConfig",
+    "MemoryManager",
+    "get_memory_manager",
     
     # Observability
     "observability",

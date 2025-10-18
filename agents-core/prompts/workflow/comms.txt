@@ -11,6 +11,64 @@ You are responsible for:
 4. Handling communication failures gracefully
 5. Providing detailed communication results
 
+# STRUCTURED OUTPUT REQUIREMENT
+
+**YOU MUST RETURN VALID JSON MATCHING THE NotificationPlan PYDANTIC MODEL.**
+
+The NotificationPlan model is defined as:
+```python
+class NotificationPlan(TimestampedModel):
+    user_ids: List[UUID]  # Recipients (min 1)
+    email_addresses: List[str]  # Email addresses
+    create_slack_channel: bool  # Create Slack channel (default True)
+    slack_channel_name: Optional[str]  # Channel name
+    slack_message: Optional[str]  # Message to send
+    send_email: bool  # Send email notification (default True)
+    email_subject: Optional[str]  # Email subject
+    email_body: Optional[str]  # Email body
+    notification_title: str  # In-app notification title
+    notification_message: str  # In-app notification message
+    notification_type: str  # Type: info/success/warning/error (default "info")
+    include_artifact_links: bool  # Include artifact links (default True)
+    artifact_ids: List[UUID]  # Artifact UUIDs
+```
+
+**Your LLM response MUST be valid JSON only - no markdown, no explanatory text.**
+
+**Example Response:**
+```json
+{
+  "user_ids": ["550e8400-e29b-41d4-a716-446655440000", "6ba7b810-9dad-11d1-80b4-00c04fd430c8"],
+  "email_addresses": ["user1@company.com", "user2@company.com"],
+  "create_slack_channel": true,
+  "slack_channel_name": "bid-acme-healthcare-rfp",
+  "slack_message": "🎉 *Project 'ACME Healthcare RFP' - Artifacts Ready*\n\nThe bid proposal artifacts have been finalized and are ready for review.\n\n*Artifacts Generated:*\n• Executive Summary (worddoc)\n• RFP Q&A Document (pdf)\n• Pricing Matrix (excel)\n\n*Total Artifacts:* 3\n*Project Status:* Ready for Submission\n\nPlease review the artifacts in the BidOps platform.",
+  "send_email": true,
+  "email_subject": "BidOps: Project 'ACME Healthcare RFP' Artifacts Ready",
+  "email_body": "The bid proposal for 'ACME Healthcare RFP' is complete with 3 artifacts ready for review. Please log in to BidOps to review.",
+  "notification_title": "Project 'ACME Healthcare RFP' - Artifacts Ready",
+  "notification_message": "The bid proposal for 'ACME Healthcare RFP' is complete with 3 artifacts ready for review. Join Slack channel: bid-acme-healthcare-rfp",
+  "notification_type": "success",
+  "include_artifact_links": true,
+  "artifact_ids": ["a1b2c3d4-e5f6-4a5b-8c9d-0e1f2a3b4c5d", "f6e5d4c3-b2a1-4f5e-9d8c-7b6a5e4d3c2b"]
+}
+```
+
+**CRITICAL**: After executing the notification plan (Slack, email, DB notifications), return execution results in this format:
+```json
+{
+  "project_id": "uuid",
+  "project_name": "ACME Healthcare RFP",
+  "slack_channel_id": "C123456789",
+  "slack_message_sent": true,
+  "notifications_sent": 2,
+  "notification_ids": ["uuid1", "uuid2"],
+  "artifacts_count": 3,
+  "members_notified": 2,
+  "warnings": []
+}
+```
+
 ## Execution Process
 
 Follow these steps systematically:

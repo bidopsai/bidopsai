@@ -35,7 +35,7 @@ from pydantic import BaseModel, Field
 
 from core.config import get_config
 from core.conversation_manager import ConversationManager
-from core.memory_manager import get_memory_manager
+from core.memory import get_memory_manager
 from core.database import init_database, close_database, db_pool
 from core.error_handling import AgentError, ErrorCode, ErrorSeverity
 from core.observability import (
@@ -95,15 +95,7 @@ async def startup_event():
         # Initialize core services
         await init_database()
         
-        # Initialize AgentCore Memory System
-        from core.agentcore_memory import initialize_agentcore_memory
-        memory_id = await initialize_agentcore_memory()
-        log_agent_action(
-            agent_name="ai_assistant_executor",
-            action="agentcore_memory_initialized",
-            details={"memory_id": memory_id}
-        )
-        
+        # Initialize memory manager (AgentCore Memory integrated via Phase 4)
         get_memory_manager()
         initialize_observability()
         
@@ -114,9 +106,8 @@ async def startup_event():
             agent_name="ai_assistant_executor",
             action="startup_complete",
             details={
-                "services": ["database", "agentcore_memory", "memory_manager", "observability", "tools"],
-                "mode": "ai_assistant",
-                "memory_id": memory_id
+                "services": ["database", "memory_manager", "observability", "tools"],
+                "mode": "ai_assistant"
             }
         )
         
@@ -386,10 +377,10 @@ async def _load_conversation_context(
     project_id: UUID = None
 ) -> ConversationContext:
     """
-    Load conversation context from AgentCore Memory.
+    Load conversation context for AI Assistant.
     
-    Uses AgentCore RequestContext-compatible session storage for
-    multi-turn conversation continuity.
+    Creates minimal conversation context. Full context is managed by
+    AgentCore Memory system integrated in Phase 4 via agent.with_memory().
     
     Args:
         user_id: User ID
@@ -397,52 +388,27 @@ async def _load_conversation_context(
         project_id: Optional project ID for context
     
     Returns:
-        ConversationContext with user preferences and history
+        ConversationContext for this conversation turn
     """
-    try:
-        from core.memory_manager import load_session_context
-        
-        # Load session context using RequestContext-compatible helper
-        session_data = await load_session_context(
-            session_id=session_id,
-            user_id=str(user_id)
-        )
-        
-        if session_data:
-            log_agent_action(
-                agent_name="ai_assistant_executor",
-                action="session_context_loaded",
-                details={
-                    "session_id": session_id,
-                    "has_history": len(session_data.get("conversation_history", [])) > 0
-                }
-            )
-            
-            return ConversationContext(
-                user_id=user_id,
-                session_id=session_id,
-                project_id=project_id or session_data.get("active_project_id"),
-                active_workflow_id=session_data.get("active_workflow_id"),
-                conversation_history=session_data.get("conversation_history", []),
-                user_preferences=session_data.get("preferences", {})
-            )
-        
-        # Create new context if not found
-        logger.info(f"No existing session context for {session_id}, creating new")
-        return ConversationContext(
-            user_id=user_id,
-            session_id=session_id,
-            project_id=project_id
-        )
-        
-    except Exception as e:
-        logger.warning(f"Could not load session context: {e}")
-        # Return minimal context on error
-        return ConversationContext(
-            user_id=user_id,
-            session_id=session_id,
-            project_id=project_id
-        )
+    log_agent_action(
+        agent_name="ai_assistant_executor",
+        action="creating_conversation_context",
+        details={
+            "session_id": session_id,
+            "user_id": str(user_id),
+            "has_project": project_id is not None
+        }
+    )
+    
+    # Create conversation context
+    # Note: Agent memory is handled via Phase 4's with_memory() integration
+    return ConversationContext(
+        user_id=user_id,
+        session_id=session_id,
+        project_id=project_id,
+        conversation_history=[],  # Agent memory handles history
+        user_preferences={}  # Agent memory handles preferences
+    )
 
 
 async def _execute_ai_assistant_with_streaming(
@@ -642,7 +608,10 @@ async def _persist_session_context(
     final_state: IntentRouterState
 ) -> None:
     """
-    Persist session context for conversation continuity.
+    Log session completion (persistence handled by AgentCore Memory).
+    
+    Session context is automatically persisted by AgentCore Memory system
+    via Phase 4 integration. This function logs the completion for observability.
     
     Args:
         session_id: Session ID
@@ -650,36 +619,17 @@ async def _persist_session_context(
         conversation_context: Current conversation context
         final_state: Final state from execution
     """
-    try:
-        from core.memory_manager import update_session_context
-        
-        # Prepare session updates
-        session_updates = {
-            "conversation_history": conversation_context.conversation_history or [],
-            "last_intent": final_state.classified_intent.intent.value if final_state.classified_intent else None,
-            "last_agent": final_state.selected_agent,
-            "last_interaction": datetime.utcnow().isoformat()
+    log_agent_action(
+        agent_name="ai_assistant_executor",
+        action="session_completed",
+        details={
+            "session_id": session_id,
+            "user_id": user_id,
+            "intent": final_state.classified_intent.intent.value if final_state.classified_intent else None,
+            "agent": final_state.selected_agent,
+            "timestamp": datetime.utcnow().isoformat()
         }
-        
-        # Update session context
-        await update_session_context(
-            session_id=session_id,
-            user_id=user_id,
-            updates=session_updates
-        )
-        
-        log_agent_action(
-            agent_name="ai_assistant_executor",
-            action="session_context_persisted",
-            details={
-                "session_id": session_id,
-                "history_length": len(session_updates["conversation_history"])
-            }
-        )
-        
-    except Exception as e:
-        # Log but don't fail on session persistence errors
-        logger.warning(f"Failed to persist session context: {e}")
+    )
 
 
 # ========================================

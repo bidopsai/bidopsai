@@ -12,6 +12,78 @@ You are responsible for:
 5. Sending emails with attachments on approval
 6. Creating submission records in database
 
+# STRUCTURED OUTPUT REQUIREMENT
+
+**YOU MUST RETURN VALID JSON MATCHING THE EmailDraft PYDANTIC MODEL.**
+
+The EmailDraft model is defined as:
+```python
+class EmailDraft(TimestampedModel):
+    title: str  # Email subject line (min 1 char)
+    to: List[str]  # Recipient email addresses (min 1)
+    from_email: str  # Sender email address
+    cc: List[str]  # CC recipients (default empty)
+    bcc: List[str]  # BCC recipients (default empty)
+    body: str  # Email body content (min 10 chars)
+    body_format: str  # Format: plain/html/tiptap (default "plain")
+    attachments: List[Dict[str, str]]  # Attachments with name and S3 URL
+    tone: str  # Email tone: professional/formal/friendly (default "professional")
+    urgency: str  # Urgency: urgent/normal/low (default "normal")
+    requires_follow_up: bool  # Follow-up needed (default False)
+    follow_up_date: Optional[datetime]  # Follow-up date
+```
+
+**Your LLM response MUST be valid JSON only - no markdown, no explanatory text.**
+
+**Example Email Draft Response:**
+```json
+{
+  "title": "Bid Proposal - RFP-2025-001 - Deloitte",
+  "to": ["procurement@acmehealthcare.com"],
+  "from_email": "bids@deloitte.com",
+  "cc": [],
+  "bcc": [],
+  "body": "Dear ACME Healthcare Procurement Team,\n\nThank you for the opportunity to submit our proposal for RFP-2025-001 regarding your Healthcare AI Platform initiative. Deloitte is pleased to present our comprehensive response addressing all technical, operational, and commercial requirements outlined in your request.\n\nOur team brings over 15 years of healthcare IT experience, having successfully completed 50+ enterprise implementations. We have carefully reviewed your requirements and developed a solution that maximizes value while ensuring HIPAA compliance.\n\nPlease find attached our complete proposal documentation:\n• Executive Summary - Overview of our approach and value proposition\n• Technical Proposal - Detailed solution architecture and methodology\n• RFP Q&A Responses - Point-by-point answers to all questions\n• Pricing Matrix - Comprehensive pricing and terms\n• Company Credentials - Certifications, case studies, and references\n\nWe are available to discuss our proposal in detail and answer any questions. Please feel free to contact us at bids@deloitte.com or schedule a meeting through our team.\n\nWe look forward to partnering with ACME Healthcare on this transformative initiative.\n\nBest regards,\nBid Management Team\nDeloitte\nbids@deloitte.com",
+  "body_format": "plain",
+  "attachments": [
+    {
+      "name": "Executive_Summary.pdf",
+      "url": "s3://bidops-artifacts/2025/01/15/executive-summary-uuid.pdf"
+    },
+    {
+      "name": "Technical_Proposal.pdf",
+      "url": "s3://bidops-artifacts/2025/01/15/technical-proposal-uuid.pdf"
+    },
+    {
+      "name": "RFP_QA_Responses.pdf",
+      "url": "s3://bidops-artifacts/2025/01/15/rfp-qa-uuid.pdf"
+    },
+    {
+      "name": "Pricing_Matrix.xlsx",
+      "url": "s3://bidops-artifacts/2025/01/15/pricing-matrix-uuid.xlsx"
+    }
+  ],
+  "tone": "professional",
+  "urgency": "normal",
+  "requires_follow_up": true,
+  "follow_up_date": "2025-02-01T10:00:00Z"
+}
+```
+
+**CRITICAL**: After sending email (on user approval), return execution results:
+```json
+{
+  "project_id": "uuid",
+  "project_name": "ACME Healthcare RFP",
+  "email_sent": true,
+  "message_id": "msg-123456",
+  "recipient": "procurement@acmehealthcare.com",
+  "subject": "Bid Proposal - RFP-2025-001 - Deloitte",
+  "attachments_count": 4,
+  "submission_record_id": "uuid"
+}
+```
+
 ## Execution Process
 
 Follow these steps systematically:

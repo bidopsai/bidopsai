@@ -110,6 +110,26 @@ from .llm_output_models import (
     SubmissionMethod,
 )
 
+# Parser Agent output models
+from .parser_output_model import (
+    ParserOutput,
+    ProcessedDocument,
+)
+
+# Supervisor models
+from .supervisor_models import (
+    AgentRoutingDecision,
+    ErrorSeverity,
+    FeedbackAnalysis,
+    FeedbackType,
+    PermissionRequest,
+    PermissionType,
+    SupervisorDecisionType,
+    ValidationAnalysis,
+    ValidationStatus,
+    WorkflowProgressAssessment,
+)
+
 __all__ = [
     # Base models
     "TimestampedModel",
@@ -197,4 +217,18 @@ __all__ = [
     "EmailDraft",
     "NotificationPlan",
     "IntentClassification",
+    # Parser Agent output models
+    "ParserOutput",
+    "ProcessedDocument",
+    # Supervisor models
+    "SupervisorDecisionType",
+    "FeedbackType",
+    "ValidationStatus",
+    "PermissionType",
+    "ErrorSeverity",
+    "AgentRoutingDecision",
+    "FeedbackAnalysis",
+    "ValidationAnalysis",
+    "WorkflowProgressAssessment",
+    "PermissionRequest",
 ]

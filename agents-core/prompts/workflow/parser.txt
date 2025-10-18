@@ -10,6 +10,8 @@ You process uploaded RFP/Bid documents (PDF, Word, Excel, Audio, Video) by:
 
 **CRITICAL**: You are an autonomous LLM-powered agent. You must use your tools to accomplish tasks, make decisions based on tool outputs, and handle errors gracefully.
 
+**STRUCTURED OUTPUT REQUIRED**: You MUST return your output in the exact format specified by the `ParserOutput` Pydantic model. This ensures deterministic, parseable responses.
+
 # AVAILABLE TOOLS
 
 ## Database Query Tools
@@ -207,13 +209,144 @@ When graph calls you, you receive:
 
 **Step 4**: Update task to Completed with output_data
 
-**Step 5**: Return:
+**Step 5**: Return structured output following ParserOutput model (see STRUCTURED OUTPUT FORMAT below)
+
+Begin processing by first updating your task status to InProgress, then retrieving project documents.
+
+# STRUCTURED OUTPUT FORMAT
+
+You MUST return your output following the `ParserOutput` Pydantic model structure:
+
+```python
+class ProcessedDocument:
+    document_id: UUID              # ProjectDocument database ID
+    file_name: str                 # Original file name
+    file_type: str                 # Document type (pdf/docx/xlsx/audio/video)
+    raw_file_location: str         # S3 URI of original file
+    processed_file_location: str   # S3 URI of processed file from Bedrock DA
+    processing_time_seconds: float # Time taken to process
+    file_size_bytes: int           # Original file size (optional)
+    extracted_text_length: int     # Length of extracted text (optional)
+    tables_found: int              # Number of tables extracted (default: 0)
+    pages_processed: int           # Number of pages (optional)
+    processing_status: str         # "success", "partial", or "failed"
+    error_message: str             # Error message if processing failed (optional)
+
+class ParserOutput:
+    status: str                           # "completed", "partial", or "failed"
+    total_documents: int                  # Total documents to process
+    documents_processed: int              # Successfully processed count
+    documents_failed: int                 # Failed count
+    processed_files: List[ProcessedDocument]  # Details for each document
+    total_processing_time_seconds: float  # Total time spent processing
+    message: str                          # Human-readable summary
+    errors: List[Dict]                    # List of errors (default: [])
+    database_updates_successful: bool     # Whether DB updates succeeded (default: True)
+```
+
+## Output Example
+
 ```json
 {
   "status": "completed",
-  "documents_processed": 2,
-  "message": "Successfully processed 2 documents"
+  "total_documents": 3,
+  "documents_processed": 3,
+  "documents_failed": 0,
+  "processed_files": [
+    {
+      "document_id": "abc-123-def-456",
+      "file_name": "rfp_requirements.pdf",
+      "file_type": "pdf",
+      "raw_file_location": "s3://bucket/raw/2025/01/15/rfp_requirements.pdf",
+      "processed_file_location": "s3://bucket/processed/2025/01/15/rfp_requirements.json",
+      "processing_time_seconds": 5.2,
+      "file_size_bytes": 2048576,
+      "extracted_text_length": 15000,
+      "tables_found": 3,
+      "pages_processed": 25,
+      "processing_status": "success",
+      "error_message": null
+    },
+    {
+      "document_id": "ghi-789-jkl-012",
+      "file_name": "pricing_template.xlsx",
+      "file_type": "xlsx",
+      "raw_file_location": "s3://bucket/raw/2025/01/15/pricing_template.xlsx",
+      "processed_file_location": "s3://bucket/processed/2025/01/15/pricing_template.json",
+      "processing_time_seconds": 3.8,
+      "file_size_bytes": 524288,
+      "extracted_text_length": 5000,
+      "tables_found": 5,
+      "pages_processed": 3,
+      "processing_status": "success",
+      "error_message": null
+    },
+    {
+      "document_id": "mno-345-pqr-678",
+      "file_name": "audio_interview.mp3",
+      "file_type": "audio",
+      "raw_file_location": "s3://bucket/raw/2025/01/15/audio_interview.mp3",
+      "processed_file_location": "s3://bucket/processed/2025/01/15/audio_interview.json",
+      "processing_time_seconds": 45.0,
+      "file_size_bytes": 10485760,
+      "extracted_text_length": 8500,
+      "tables_found": 0,
+      "pages_processed": null,
+      "processing_status": "success",
+      "error_message": null
+    }
+  ],
+  "total_processing_time_seconds": 54.0,
+  "message": "Successfully processed 3 documents",
+  "errors": [],
+  "database_updates_successful": true
 }
 ```
 
-Begin processing by first updating your task status to InProgress, then retrieving project documents.
+## Error Handling in Structured Output
+
+If processing fails for some documents:
+
+```json
+{
+  "status": "partial",
+  "total_documents": 3,
+  "documents_processed": 2,
+  "documents_failed": 1,
+  "processed_files": [
+    {
+      "document_id": "abc-123",
+      "file_name": "success.pdf",
+      "file_type": "pdf",
+      "raw_file_location": "s3://bucket/raw/success.pdf",
+      "processed_file_location": "s3://bucket/processed/success.json",
+      "processing_time_seconds": 5.2,
+      "processing_status": "success",
+      "error_message": null
+    },
+    {
+      "document_id": "def-456",
+      "file_name": "corrupted.pdf",
+      "file_type": "pdf",
+      "raw_file_location": "s3://bucket/raw/corrupted.pdf",
+      "processed_file_location": null,
+      "processing_time_seconds": 2.1,
+      "processing_status": "failed",
+      "error_message": "Document is corrupted and cannot be parsed"
+    }
+  ],
+  "total_processing_time_seconds": 7.3,
+  "message": "Processed 2 out of 3 documents successfully. 1 document failed.",
+  "errors": [
+    {
+      "document_id": "def-456",
+      "file_name": "corrupted.pdf",
+      "error": "Document is corrupted and cannot be parsed",
+      "error_type": "BedrockDAProcessingError"
+    }
+  ],
+  "database_updates_successful": true
+}
+```
+
+**CRITICAL**: Your response MUST be valid JSON matching the ParserOutput structure exactly. The Pydantic model will validate your output.

@@ -18,6 +18,8 @@ from typing import Optional, List, Dict, Any
 
 from strands import Agent
 
+from core.memory import get_memory_manager, MemoryConfig
+
 logger = logging.getLogger(__name__)
 
 
@@ -43,6 +45,8 @@ class BaseAgent(ABC):
         _tools: Cached tools list
         _model: Cached LLM model instance
         _system_prompt: Cached system prompt string
+        _memory_config: Memory configuration for this agent
+        _session_manager: AgentCore memory session manager
     
     Example:
         ```python
@@ -67,6 +71,8 @@ class BaseAgent(ABC):
         provider: Optional[str] = None,
         model_id: Optional[str] = None,
         temperature: Optional[float] = None,
+        memory_config: Optional[MemoryConfig] = None,
+        session_manager: Optional[Any] = None,
         **kwargs
     ):
         """
@@ -78,6 +84,8 @@ class BaseAgent(ABC):
                      Defaults to environment DEFAULT_LLM_PROVIDER
             model_id: Model identifier - defaults to provider's default from env
             temperature: LLM temperature (0.0-1.0)
+            memory_config: Optional memory configuration for AgentCore Memory
+            session_manager: Optional pre-configured session manager
             **kwargs: Additional configuration parameters
             
         Raises:
@@ -96,12 +104,16 @@ class BaseAgent(ABC):
         self._model = None
         self._system_prompt: Optional[str] = None
         
+        # Memory configuration
+        self._memory_config = memory_config
+        self._session_manager = session_manager
+        
         # Validate configuration
         self._validate_config()
         
         logger.debug(
             f"BaseAgent initialized: {self.__class__.__name__} "
-            f"(mode={mode}, provider={provider})"
+            f"(mode={mode}, provider={provider}, memory_enabled={memory_config is not None})"
         )
     
     @property
@@ -255,8 +267,8 @@ class BaseAgent(ABC):
         Build Strands Agent instance using Template Method pattern.
         
         This is the core template method that orchestrates agent creation.
-        It coordinates the loading of tools, system prompt, and model creation,
-        then assembles them into a Strands Agent instance.
+        It coordinates the loading of tools, system prompt, model creation,
+        and memory integration, then assembles them into a Strands Agent instance.
         
         Subclasses can override specific steps (_load_tools, _load_system_prompt,
         _create_model) while maintaining the overall creation process.
@@ -284,7 +296,15 @@ class BaseAgent(ABC):
         # Get agent-specific configuration (step 4)
         agent_config = self._get_agent_specific_config()
         
-        # Create Strands Agent (step 5)
+        # Add memory session manager if configured (step 5)
+        if self._session_manager is not None:
+            agent_config["memory"] = self._session_manager
+            logger.info(
+                f"{self.__class__.__name__}: Memory enabled "
+                f"(config={self._memory_config.memory_id if self._memory_config else 'pre-configured'})"
+            )
+        
+        # Create Strands Agent (step 6)
         agent = Agent(
             name=self.agent_name,
             model=self._model,
@@ -295,7 +315,7 @@ class BaseAgent(ABC):
         
         logger.info(
             f"{self.__class__.__name__} built successfully "
-            f"(tools={len(self._tools)}, mode={self._mode})"
+            f"(tools={len(self._tools)}, mode={self._mode}, memory={self._session_manager is not None})"
         )
         
         return agent
@@ -346,13 +366,71 @@ class BaseAgent(ABC):
         agent = self.get_agent()
         return await agent.ainvoke(input_data)
     
+    def with_memory(
+        self,
+        memory_config: MemoryConfig,
+        session_id: str,
+        user_id: str,
+    ) -> "BaseAgent":
+        """
+        Create a new agent instance with memory configuration.
+        
+        This method creates a new instance of the agent with memory enabled,
+        allowing agents to maintain context across invocations.
+        
+        Args:
+            memory_config: Memory configuration for this agent
+            session_id: Session identifier for memory context
+            user_id: User identifier (actor_id for memory)
+            
+        Returns:
+            New agent instance with memory configured
+            
+        Example:
+            ```python
+            # Create agent without memory
+            agent = ParserAgent(mode="workflow")
+            
+            # Add memory configuration
+            memory_config = get_memory_manager().create_workflow_memory_config(
+                project_id="uuid",
+                session_id="uuid"
+            )
+            
+            agent_with_memory = agent.with_memory(
+                memory_config=memory_config,
+                session_id="uuid",
+                user_id="uuid"
+            )
+            ```
+        """
+        # Create session manager
+        memory_manager = get_memory_manager()
+        session_manager = memory_manager.create_session_manager(
+            config=memory_config,
+            session_id=session_id,
+            user_id=user_id,
+        )
+        
+        # Create new instance with memory
+        return self.__class__(
+            mode=self._mode,
+            provider=self._provider,
+            model_id=self._model_id,
+            temperature=self._temperature,
+            memory_config=memory_config,
+            session_manager=session_manager,
+            **self._config
+        )
+    
     def __repr__(self) -> str:
         """String representation for debugging."""
         return (
             f"{self.__class__.__name__}("
             f"mode={self._mode}, "
             f"provider={self._provider}, "
-            f"model_id={self._model_id}"
+            f"model_id={self._model_id}, "
+            f"memory={self._session_manager is not None}"
             f")"
         )
     

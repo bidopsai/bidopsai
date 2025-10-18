@@ -25,6 +25,7 @@ from core.database import db_pool
 from core.sse_manager import get_sse_manager
 from core.error_handling import AgentError, ErrorCode, ErrorSeverity
 from core.observability import log_agent_action
+from core.memory import get_memory_manager
 from models.workflow_models import WorkflowExecutionStatus
 from models.sse_models import (
     WorkflowCreated,
@@ -101,6 +102,106 @@ def _extract_agent_output(agent_result: Any) -> Dict[str, Any]:
         return {"output": content}
     except (json.JSONDecodeError, TypeError):
         return {"output": content}
+
+
+def _create_agent_with_memory(
+    agent_class,
+    agent_name: str,
+    state: WorkflowGraphState,
+    mode: str = "workflow",
+    provider: str = "bedrock"
+):
+    """
+    Create agent instance with AgentCore Memory integration.
+    
+    This helper function creates an agent instance and configures it with
+    appropriate memory based on the workflow context. Memory enables agents
+    to maintain context across invocations and learn from past interactions.
+    
+    Memory Types Configured:
+    - Workflow Memory: Session-based context for this execution
+    - Project Memory: Project artifacts and document history
+    - User Preference Memory: User feedback patterns
+    - Agent Learning Memory: Agent-specific performance insights
+    
+    Args:
+        agent_class: Agent class to instantiate (ParserAgent, AnalysisAgent, etc.)
+        agent_name: Name of the agent (for logging and memory config)
+        state: Current workflow state (contains project_id, user_id, session_id)
+        mode: Agent mode (default: "workflow")
+        provider: LLM provider (default: "bedrock")
+        
+    Returns:
+        Agent instance configured with memory
+        
+    Example:
+        ```python
+        parser = _create_agent_with_memory(
+            agent_class=ParserAgent,
+            agent_name="parser",
+            state=state
+        )
+        ```
+    """
+    # Create base agent instance
+    agent = agent_class(mode=mode, provider=provider)
+    
+    # Get memory manager
+    memory_manager = get_memory_manager()
+    
+    # Check if memory is enabled
+    if not memory_manager.is_memory_enabled():
+        log_agent_action(
+            agent_name=_agent_name,
+            action="agent_created_without_memory",
+            details={
+                "agent_name": agent_name,
+                "reason": "Memory service not available"
+            },
+            level="warning"
+        )
+        return agent
+    
+    try:
+        # Create workflow memory configuration (session-scoped)
+        memory_config = memory_manager.create_workflow_memory_config(
+            project_id=str(state.project_id),
+            session_id=state.session_id,
+            ttl_hours=24  # Workflow memory expires after 24 hours
+        )
+        
+        # Configure agent with memory using fluent interface
+        agent_with_memory = agent.with_memory(
+            memory_config=memory_config,
+            session_id=state.session_id,
+            user_id=str(state.user_id)
+        )
+        
+        log_agent_action(
+            agent_name=_agent_name,
+            action="agent_created_with_memory",
+            details={
+                "agent_name": agent_name,
+                "memory_id": memory_config.memory_id,
+                "memory_scope": memory_config.scope.value,
+                "workflow_id": str(state.workflow_execution_id)
+            }
+        )
+        
+        return agent_with_memory
+        
+    except Exception as memory_error:
+        log_agent_action(
+            agent_name=_agent_name,
+            action="agent_memory_config_failed",
+            details={
+                "agent_name": agent_name,
+                "error": str(memory_error)
+            },
+            level="warning"
+        )
+        # Return agent without memory as fallback
+        return agent
 
 
 async def _invoke_agent_with_context(
@@ -186,37 +287,38 @@ async def _invoke_agent_with_context(
 
 async def supervisor_node(state: WorkflowGraphState) -> WorkflowGraphState:
     """
-    DATABASE-DRIVEN Supervisor orchestrator node.
+    AGENT-DRIVEN Supervisor orchestrator node using structured outputs.
     
-    **CRITICAL DESIGN**: This supervisor is DB-centric, not state-centric.
-    All routing decisions are based on querying the database using tools,
-    following the mermaid diagram (lines 1166-1209).
+    **CRITICAL DESIGN CHANGE**: This supervisor is now AGENT-DRIVEN, not hardcoded.
+    The supervisor agent uses database tools and structured outputs (Pydantic models)
+    to make intelligent routing decisions based on workflow state.
     
     Flow:
     1. Check if workflow initialized (workflow_execution_id exists)
     2. If not initialized → route to "initialize"
-    3. If initialized → call get_next_incomplete_task() tool to query DB
-    4. Based on DB response → route to appropriate agent node
-    5. Handle special cases (validation failures, user feedback)
+    3. If initialized → create WorkflowSupervisor agent instance
+    4. Agent queries DB using tools (get_next_incomplete_task, get_workflow_execution, etc.)
+    5. Agent analyzes state and returns AgentRoutingDecision (structured output)
+    6. Execute the decision (route to agent, reset tasks, await feedback, etc.)
+    7. Emit SSE events based on decision
     
     Args:
         state: Current workflow graph state
         
     Returns:
-        Updated state with next_node decision in task_outputs
+        Updated state with routing decision executed
     """
     log_agent_action(
         agent_name=_agent_name,
-        action="supervisor_analyzing_db_state",
+        action="supervisor_analyzing_workflow_state",
         details={
             "workflow_id": str(state.workflow_execution_id) if state.workflow_execution_id else "not_initialized",
             "project_id": str(state.project_id),
-            "user_id": str(state.user_id)
+            "user_id": str(state.user_id),
+            "completed_tasks": state.completed_tasks,
+            "failed_tasks": state.failed_tasks
         }
     )
-    
-    next_node = None
-    reason = ""
     
     # Step 1: Check if workflow needs initialization
     if not state.workflow_execution_id:
@@ -226,202 +328,305 @@ async def supervisor_node(state: WorkflowGraphState) -> WorkflowGraphState:
         state.task_outputs["supervisor"] = {
             "next_node": next_node,
             "reason": reason,
-            "timestamp": datetime.utcnow().isoformat()
+            "timestamp": datetime.utcnow().isoformat(),
+            "agent_driven": False  # This is hardcoded routing for initialization
         }
         
         log_agent_action(
             agent_name=_agent_name,
-            action="supervisor_decision",
+            action="supervisor_decision_initialize",
             details={"next_node": next_node, "reason": reason}
         )
         
         return state
     
-    # Step 2: Query DB for next incomplete task
+    # Step 2: Create WorkflowSupervisor agent instance (OOP pattern)
     try:
-        # Call get_next_incomplete_task tool (no agent_name parameter)
-        next_task = await get_next_incomplete_task(
-            workflow_execution_id=str(state.workflow_execution_id)
-        )
+        from agents import WorkflowSupervisor
+        from models.supervisor_models import AgentRoutingDecision
         
-        if not next_task:
-            # No more incomplete tasks → workflow complete
-            next_node = "complete"
-            reason = "All agent tasks completed in DB"
+        supervisor = WorkflowSupervisor()
+        strands_agent = supervisor.get_agent()
         
-        else:
-            # Route based on DB task name
-            agent_name = next_task.get("agent", "")
-            task_status = next_task.get("status", "")
-            
-            # Map agent names to node names
-            agent_to_node_map = {
-                "parser": "parser",
-                "analysis": "analysis",
-                "content": "content",
-                "compliance": "compliance",
-                "qa": "qa",
-                "comms": "comms",
-                "submission": "submission"
+        # Step 3: Prepare context for agent decision-making
+        # The agent will use this context + database tools to make decisions
+        decision_context = {
+            "workflow_execution_id": str(state.workflow_execution_id),
+            "project_id": str(state.project_id),
+            "user_id": str(state.user_id),
+            "session_id": state.session_id,
+            "completed_tasks": state.completed_tasks,
+            "failed_tasks": state.failed_tasks,
+            "awaiting_user_feedback": state.awaiting_user_feedback,
+            "last_user_message": state.last_user_message,
+            "user_feedback": state.user_feedback,
+            "content_edits": state.content_edits,
+            "task_outputs": {
+                "compliance": state.task_outputs.get("compliance", {}),
+                "qa": state.task_outputs.get("qa", {}),
+                "analysis": state.task_outputs.get("analysis", {})
             }
-            
-            if agent_name in agent_to_node_map:
-                next_node = agent_to_node_map[agent_name]
-                reason = f"DB shows next incomplete task: {agent_name} (status: {task_status})"
-            
-            else:
-                # Unknown agent name - log error and complete
-                log_agent_action(
-                    agent_name=_agent_name,
-                    action="supervisor_error",
-                    details={
-                        "error": f"Unknown agent name from DB: {agent_name}",
-                        "task": next_task
-                    }
-                )
-                next_node = "complete"
-                reason = f"Unknown agent task '{agent_name}' - completing workflow"
+        }
         
-        # Handle special awaiting nodes based on previous task completion
-        # Check if we need user feedback after analysis
-        if next_node == "content" and "analysis" in state.completed_tasks:
-            # First time moving to content → await analysis feedback
-            if not state.awaiting_user_feedback:
-                next_node = "await_analysis_feedback"
-                reason = "Analysis completed, awaiting user feedback before content"
+        # Step 4: Construct prompt for agent
+        # The system prompt already instructs the agent to use structured output
+        decision_prompt = f"""
+You are the Workflow Supervisor for project {state.project_id}.
+
+Current Workflow State:
+- Workflow Execution ID: {state.workflow_execution_id}
+- Completed Tasks: {', '.join(state.completed_tasks) if state.completed_tasks else 'None'}
+- Failed Tasks: {', '.join(state.failed_tasks) if state.failed_tasks else 'None'}
+- Awaiting User Feedback: {state.awaiting_user_feedback}
+- User Feedback: {state.user_feedback if state.user_feedback else 'None'}
+- Last User Message: {state.last_user_message if state.last_user_message else 'None'}
+
+Your Task:
+1. Use database tools to query the current state (get_next_incomplete_task, get_workflow_execution)
+2. Analyze the workflow progress and determine the next action
+3. Return your routing decision as AgentRoutingDecision
+
+Remember:
+- Query the database BEFORE making decisions
+- Consider validation results from Compliance and QA agents
+- Handle user feedback appropriately (reparse, reanalyze, proceed)
+- Emit appropriate SSE events for frontend updates
+- Use RESET_TASKS decision type when validation fails
+"""
         
-        # Check if we need artifact review after QA
-        elif next_node == "comms" and "qa" in state.completed_tasks:
-            # First time moving to comms → await artifact review
-            if not state.artifact_export_completed:
-                next_node = "await_artifact_review"
-                reason = "QA completed, awaiting artifact review before export"
+        # Step 5: Invoke agent with structured output
+        # NOTE: Strands Agent's structured_output method will be called internally
+        # via model binding. For now, we'll invoke normally and parse the output.
+        input_data = {
+            "messages": [
+                {"role": "user", "content": decision_prompt}
+            ],
+            "context": decision_context
+        }
         
-        # Handle feedback loop decisions (user-driven)
-        if state.awaiting_user_feedback and "await_analysis_feedback" in state.completed_tasks:
-            feedback_output = state.task_outputs.get("await_analysis_feedback", {})
-            intent = feedback_output.get("intent", "proceed")
-            
-            if intent == "reparse":
-                # Reset parser and analysis tasks in DB
-                await reset_agent_tasks(
-                    workflow_execution_id=str(state.workflow_execution_id),
-                    agent_names=["parser", "analysis"],
-                    reset_by=str(state.user_id)
-                )
-                next_node = "parser"
-                reason = "User feedback: reparse requested - reset parser+analysis tasks in DB"
-                state.awaiting_user_feedback = False
-                
-                log_agent_action(
-                    agent_name=_agent_name,
-                    action="user_feedback_reparse",
-                    details={
-                        "workflow_id": str(state.workflow_execution_id),
-                        "reset_agents": ["parser", "analysis"]
-                    }
-                )
-            
-            elif intent == "reanalyze":
-                # Reset analysis task in DB
-                await reset_agent_tasks(
-                    workflow_execution_id=str(state.workflow_execution_id),
-                    agent_names=["analysis"],
-                    reset_by=str(state.user_id)
-                )
-                next_node = "analysis"
-                reason = "User feedback: reanalysis requested - reset analysis task in DB"
-                state.awaiting_user_feedback = False
-                
-                log_agent_action(
-                    agent_name=_agent_name,
-                    action="user_feedback_reanalyze",
-                    details={
-                        "workflow_id": str(state.workflow_execution_id),
-                        "reset_agents": ["analysis"]
-                    }
-                )
-            
-            else:
-                # Proceed to content
-                next_node = "content"
-                reason = "User feedback: approved - proceeding to content"
-                state.awaiting_user_feedback = False
-        
-        # Handle validation failures (from agent outputs)
-        # Compliance failed → reset content and compliance tasks in DB
-        if "compliance" in state.completed_tasks:
-            compliance_output = state.task_outputs.get("compliance", {})
-            if not compliance_output.get("is_compliant", True):
-                # Reset DB tasks for content and compliance
-                await reset_agent_tasks(
-                    workflow_execution_id=str(state.workflow_execution_id),
-                    agent_names=["content", "compliance"],
-                    reset_by=str(state.user_id)
-                )
-                next_node = "content"
-                reason = "Compliance failed - reset content+compliance tasks in DB"
-                
-                log_agent_action(
-                    agent_name=_agent_name,
-                    action="compliance_failed_reset",
-                    details={
-                        "workflow_id": str(state.workflow_execution_id),
-                        "reset_agents": ["content", "compliance"]
-                    }
-                )
-        
-        # QA failed → reset content, compliance, QA tasks in DB
-        if "qa" in state.completed_tasks:
-            qa_output = state.task_outputs.get("qa", {})
-            if qa_output.get("overall_status") != "complete":
-                # Reset DB tasks for content, compliance, and QA
-                await reset_agent_tasks(
-                    workflow_execution_id=str(state.workflow_execution_id),
-                    agent_names=["content", "compliance", "qa"],
-                    reset_by=str(state.user_id)
-                )
-                next_node = "content"
-                reason = "QA failed - reset content+compliance+QA tasks in DB"
-                
-                log_agent_action(
-                    agent_name=_agent_name,
-                    action="qa_failed_reset",
-                    details={
-                        "workflow_id": str(state.workflow_execution_id),
-                        "reset_agents": ["content", "compliance", "qa"]
-                    }
-                )
-    
-    except Exception as e:
         log_agent_action(
             agent_name=_agent_name,
-            action="supervisor_error",
+            action="invoking_supervisor_agent",
+            details={"workflow_id": str(state.workflow_execution_id)}
+        )
+        
+        result = await strands_agent.ainvoke(input_data)
+        
+        # Step 6: Extract AgentRoutingDecision from result
+        # The agent should return structured output following AgentRoutingDecision model
+        decision_data = _extract_agent_output(result)
+        
+        # Validate and parse as AgentRoutingDecision
+        try:
+            decision = AgentRoutingDecision(**decision_data)
+        except Exception as parse_error:
+            log_agent_action(
+                agent_name=_agent_name,
+                action="supervisor_decision_parse_error",
+                details={
+                    "error": str(parse_error),
+                    "raw_output": decision_data
+                },
+                level="error"
+            )
+            # Fallback to safe completion
+            decision = AgentRoutingDecision(
+                decision_type="COMPLETE_WORKFLOW",
+                reasoning=f"Failed to parse agent decision: {str(parse_error)}",
+                next_agent=None,
+                requires_user_input=False,
+                confidence=0.5,
+                sse_events_to_emit=[{
+                    "event_type": "workflow_error",
+                    "message": "Supervisor decision parsing failed - completing workflow"
+                }]
+            )
+        
+        log_agent_action(
+            agent_name=_agent_name,
+            action="supervisor_decision_received",
             details={
-                "error": str(e),
+                "decision_type": decision.decision_type,
+                "next_agent": decision.next_agent,
+                "reasoning": decision.reasoning,
+                "confidence": decision.confidence
+            }
+        )
+        
+        # Step 7: Execute the decision based on decision_type
+        if decision.decision_type == "ROUTE_TO_AGENT":
+            # Route to next agent
+            next_node = decision.next_agent
+            state.current_agent = decision.next_agent
+            
+        elif decision.decision_type == "AWAIT_USER_FEEDBACK":
+            # Set awaiting feedback state
+            state.awaiting_user_feedback = True
+            state.current_status = "WAITING"
+            next_node = "await_user_feedback"  # Special node that pauses workflow
+            
+            # Update workflow in DB
+            await update_workflow_execution(
+                workflow_execution_id=str(state.workflow_execution_id),
+                status="WAITING",
+                last_updated_at=datetime.utcnow().isoformat()
+            )
+            
+        elif decision.decision_type == "RESET_TASKS":
+            # Reset specified tasks in DB
+            if decision.tasks_to_reset:
+                await reset_agent_tasks(
+                    workflow_execution_id=str(state.workflow_execution_id),
+                    agent_names=decision.tasks_to_reset,
+                    reset_by=str(state.user_id)
+                )
+                
+                # Remove from completed/failed lists
+                for agent_name in decision.tasks_to_reset:
+                    if agent_name in state.completed_tasks:
+                        state.completed_tasks.remove(agent_name)
+                    if agent_name in state.failed_tasks:
+                        state.failed_tasks.remove(agent_name)
+                    state.task_outputs.pop(agent_name, None)
+                
+                log_agent_action(
+                    agent_name=_agent_name,
+                    action="tasks_reset",
+                    details={
+                        "workflow_id": str(state.workflow_execution_id),
+                        "reset_agents": decision.tasks_to_reset,
+                        "reason": decision.reasoning
+                    }
+                )
+            
+            # Route to restart agent
+            next_node = decision.restart_from_agent if decision.restart_from_agent else "supervisor"
+            
+        elif decision.decision_type == "REQUEST_PERMISSION":
+            # Request permission from user
+            state.awaiting_user_feedback = True
+            state.current_status = "WAITING"
+            next_node = "await_permission"  # Special node for permission requests
+            
+            # Update workflow in DB
+            await update_workflow_execution(
+                workflow_execution_id=str(state.workflow_execution_id),
+                status="WAITING",
+                last_updated_at=datetime.utcnow().isoformat()
+            )
+            
+        elif decision.decision_type == "COMPLETE_WORKFLOW":
+            # Complete the workflow
+            next_node = "complete"
+            state.current_status = "COMPLETED"
+            
+        elif decision.decision_type == "HANDLE_ERROR":
+            # Handle error scenario
+            log_agent_action(
+                agent_name=_agent_name,
+                action="supervisor_error_handling",
+                details={
+                    "error_code": decision.error_code,
+                    "error_message": decision.error_message,
+                    "error_severity": decision.error_severity
+                },
+                level="error"
+            )
+            
+            if decision.error_severity == "HIGH":
+                # Critical error - complete workflow with failure
+                next_node = "complete"
+                state.current_status = "FAILED"
+                state.errors.append({
+                    "code": decision.error_code,
+                    "message": decision.error_message,
+                    "severity": decision.error_severity,
+                    "timestamp": datetime.utcnow().isoformat()
+                })
+            else:
+                # Recoverable error - retry or proceed
+                next_node = decision.next_agent if decision.next_agent else "supervisor"
+        
+        else:
+            # Unknown decision type - fallback to complete
+            log_agent_action(
+                agent_name=_agent_name,
+                action="unknown_decision_type",
+                details={"decision_type": decision.decision_type},
+                level="warning"
+            )
+            next_node = "complete"
+        
+        # Step 8: Store decision in state
+        state.task_outputs["supervisor"] = {
+            "next_node": next_node,
+            "decision_type": decision.decision_type,
+            "reasoning": decision.reasoning,
+            "confidence": decision.confidence,
+            "timestamp": datetime.utcnow().isoformat(),
+            "agent_driven": True,  # Flag indicating agent-driven decision
+            "full_decision": decision.dict()  # Store full decision for debugging
+        }
+        
+        # Step 9: Emit SSE events
+        sse_manager = _get_sse_manager()
+        for event_data in decision.sse_events_to_emit:
+            try:
+                await sse_manager.send_event(
+                    session_id=state.session_id,
+                    event=WorkflowStatusUpdate(
+                        workflow_execution_id=str(state.workflow_execution_id),
+                        status=event_data.get("event_type", "update"),
+                        message=event_data.get("message", ""),
+                        timestamp=datetime.utcnow()
+                    )
+                )
+            except Exception as sse_error:
+                log_agent_action(
+                    agent_name=_agent_name,
+                    action="sse_emit_error",
+                    details={"error": str(sse_error)},
+                    level="warning"
+                )
+        
+        # Step 10: Update workflow progress if specified
+        if decision.update_progress_percentage is not None:
+            await update_project(
+                project_id=str(state.project_id),
+                progress_percentage=decision.update_progress_percentage
+            )
+        
+        log_agent_action(
+            agent_name=_agent_name,
+            action="supervisor_decision_executed",
+            details={
+                "next_node": next_node,
+                "decision_type": decision.decision_type,
                 "workflow_id": str(state.workflow_execution_id)
             }
         )
+        
+    except Exception as e:
+        log_agent_action(
+            agent_name=_agent_name,
+            action="supervisor_agent_error",
+            details={
+                "error": str(e),
+                "error_type": type(e).__name__,
+                "workflow_id": str(state.workflow_execution_id)
+            },
+            level="error"
+        )
+        
+        # Fallback to safe completion
         next_node = "complete"
-        reason = f"Error querying DB for next task: {str(e)}"
-    
-    # Store decision in state
-    state.task_outputs["supervisor"] = {
-        "next_node": next_node,
-        "reason": reason,
-        "timestamp": datetime.utcnow().isoformat(),
-        "db_driven": True  # Flag indicating this is DB-driven routing
-    }
-    
-    log_agent_action(
-        agent_name=_agent_name,
-        action="supervisor_decision",
-        details={
+        state.task_outputs["supervisor"] = {
             "next_node": next_node,
-            "reason": reason,
-            "workflow_id": str(state.workflow_execution_id)
+            "reason": f"Supervisor agent error: {str(e)}",
+            "timestamp": datetime.utcnow().isoformat(),
+            "agent_driven": False,
+            "error": str(e)
         }
-    )
     
     return state
 
@@ -520,12 +725,16 @@ async def parser_agent_node(state: WorkflowGraphState) -> WorkflowGraphState:
     Parses uploaded project documents using Bedrock Data Automation.
     Updates ProjectDocument records with processed_file_location.
     
+    **STRUCTURED OUTPUT**: This node expects ParserOutput from the agent.
+    
     Args:
         state: Current graph state
         
     Returns:
         Updated state with parser output
     """
+    from models import ParserOutput
+    
     # Get parser task
     task = await get_next_incomplete_task(
         workflow_execution_id=str(state.workflow_execution_id),
@@ -562,16 +771,48 @@ async def parser_agent_node(state: WorkflowGraphState) -> WorkflowGraphState:
     )
     
     try:
-        # Create Parser agent (Java-style instantiation)
-        parser = ParserAgent(mode="workflow", provider="bedrock")
+        # Create Parser agent with memory (OOP + Memory integration)
+        parser = _create_agent_with_memory(
+            agent_class=ParserAgent,
+            agent_name="parser",
+            state=state
+        )
         
         # Invoke agent via OOP pattern
-        output = await _invoke_agent_with_context(
+        raw_output = await _invoke_agent_with_context(
             agent_instance=parser,
             agent_name="parser",
             state=state,
             context={}
         )
+        
+        # Parse and validate structured output
+        try:
+            parser_output = ParserOutput(**raw_output)
+            output = parser_output.dict()
+            
+            log_agent_action(
+                agent_name=_agent_name,
+                action="parser_structured_output_validated",
+                details={
+                    "workflow_id": str(state.workflow_execution_id),
+                    "documents_processed": parser_output.documents_processed,
+                    "documents_failed": parser_output.documents_failed,
+                    "status": parser_output.status
+                }
+            )
+        except Exception as parse_error:
+            log_agent_action(
+                agent_name=_agent_name,
+                action="parser_output_validation_failed",
+                details={
+                    "error": str(parse_error),
+                    "raw_output_keys": list(raw_output.keys()) if isinstance(raw_output, dict) else "not_a_dict"
+                },
+                level="error"
+            )
+            # Use raw output as fallback
+            output = raw_output
         
         # Update task as completed
         await update_agent_task(
@@ -618,12 +859,16 @@ async def analysis_agent_node(state: WorkflowGraphState) -> WorkflowGraphState:
     Analyzes RFP requirements, extracts client info, identifies deliverables.
     Generates markdown analysis report for user review.
     
+    **STRUCTURED OUTPUT**: This node expects AnalysisOutput from the agent.
+    
     Args:
         state: Current graph state
         
     Returns:
         Updated state with analysis output
     """
+    from models.llm_output_models import AnalysisOutput
+    
     # Get analysis task
     task = await get_next_incomplete_task(
         workflow_execution_id=str(state.workflow_execution_id),
@@ -660,20 +905,52 @@ async def analysis_agent_node(state: WorkflowGraphState) -> WorkflowGraphState:
     )
     
     try:
-        # Create Analysis agent (Java-style instantiation)
-        analysis = AnalysisAgent(mode="workflow", provider="bedrock")
+        # Create Analysis agent with memory (OOP + Memory integration)
+        analysis = _create_agent_with_memory(
+            agent_class=AnalysisAgent,
+            agent_name="analysis",
+            state=state
+        )
         
         # Pass parser output in context
         parser_output = state.task_outputs.get("parser", {})
         context = {"parser_output": parser_output}
         
         # Invoke agent via OOP pattern
-        output = await _invoke_agent_with_context(
+        raw_output = await _invoke_agent_with_context(
             agent_instance=analysis,
             agent_name="analysis",
             state=state,
             context=context
         )
+        
+        # Parse and validate structured output
+        try:
+            analysis_output = AnalysisOutput(**raw_output)
+            output = analysis_output.dict()
+            
+            log_agent_action(
+                agent_name=_agent_name,
+                action="analysis_structured_output_validated",
+                details={
+                    "workflow_id": str(state.workflow_execution_id),
+                    "client_name": analysis_output.client_info.name if analysis_output.client_info else "N/A",
+                    "deliverables_count": len(analysis_output.deliverables),
+                    "deadline": str(analysis_output.deadline) if analysis_output.deadline else "N/A"
+                }
+            )
+        except Exception as parse_error:
+            log_agent_action(
+                agent_name=_agent_name,
+                action="analysis_output_validation_failed",
+                details={
+                    "error": str(parse_error),
+                    "raw_output_keys": list(raw_output.keys()) if isinstance(raw_output, dict) else "not_a_dict"
+                },
+                level="error"
+            )
+            # Use raw output as fallback
+            output = raw_output
         
         # Update task as completed
         await update_agent_task(
@@ -764,9 +1041,13 @@ async def content_agent_node(state: WorkflowGraphState) -> WorkflowGraphState:
     )
     
     try:
-        # Create Content agent (Java-style instantiation)
+        # Create Content agent with memory (OOP + Memory integration)
         # Note: ContentAgent has KnowledgeAgent via Composition
-        content = ContentAgent(mode="workflow", provider="bedrock")
+        content = _create_agent_with_memory(
+            agent_class=ContentAgent,
+            agent_name="content",
+            state=state
+        )
         
         # Pass analysis output and any compliance/QA feedback in context
         context = {
@@ -831,12 +1112,16 @@ async def compliance_agent_node(state: WorkflowGraphState) -> WorkflowGraphState
     Validates artifacts against Deloitte standards and compliance requirements.
     Provides feedback for non-compliant content.
     
+    **STRUCTURED OUTPUT**: This node expects ComplianceCheckOutput from the agent.
+    
     Args:
         state: Current graph state
         
     Returns:
         Updated state with compliance output
     """
+    from models.llm_output_models import ComplianceCheckOutput
+    
     # Get compliance task
     task = await get_next_incomplete_task(
         workflow_execution_id=str(state.workflow_execution_id),
@@ -873,19 +1158,51 @@ async def compliance_agent_node(state: WorkflowGraphState) -> WorkflowGraphState
     )
     
     try:
-        # Create Compliance agent (Java-style instantiation)
-        compliance = ComplianceAgent(mode="workflow", provider="bedrock")
+        # Create Compliance agent with memory (OOP + Memory integration)
+        compliance = _create_agent_with_memory(
+            agent_class=ComplianceAgent,
+            agent_name="compliance",
+            state=state
+        )
         
         # Pass content output in context
         context = {"content_output": state.task_outputs.get("content", {})}
         
         # Invoke agent via OOP pattern
-        output = await _invoke_agent_with_context(
+        raw_output = await _invoke_agent_with_context(
             agent_instance=compliance,
             agent_name="compliance",
             state=state,
             context=context
         )
+        
+        # Parse and validate structured output
+        try:
+            compliance_output = ComplianceCheckOutput(**raw_output)
+            output = compliance_output.dict()
+            
+            log_agent_action(
+                agent_name=_agent_name,
+                action="compliance_structured_output_validated",
+                details={
+                    "workflow_id": str(state.workflow_execution_id),
+                    "artifacts_reviewed": len(compliance_output.artifact_feedback),
+                    "compliant": compliance_output.compliant,
+                    "total_issues": sum(len(af.issues) for af in compliance_output.artifact_feedback)
+                }
+            )
+        except Exception as parse_error:
+            log_agent_action(
+                agent_name=_agent_name,
+                action="compliance_output_validation_failed",
+                details={
+                    "error": str(parse_error),
+                    "raw_output_keys": list(raw_output.keys()) if isinstance(raw_output, dict) else "not_a_dict"
+                },
+                level="error"
+            )
+            # Use raw output as fallback
+            output = raw_output
         
         # Update task as completed
         await update_agent_task(
@@ -934,12 +1251,16 @@ async def qa_agent_node(state: WorkflowGraphState) -> WorkflowGraphState:
     Performs quality assurance checks on artifacts.
     Identifies gaps, missing content, or quality issues.
     
+    **STRUCTURED OUTPUT**: This node expects QACheckOutput from the agent.
+    
     Args:
         state: Current graph state
         
     Returns:
         Updated state with QA output
     """
+    from models.llm_output_models import QACheckOutput
+    
     # Get QA task
     task = await get_next_incomplete_task(
         workflow_execution_id=str(state.workflow_execution_id),
@@ -976,8 +1297,12 @@ async def qa_agent_node(state: WorkflowGraphState) -> WorkflowGraphState:
     )
     
     try:
-        # Create QA agent (Java-style instantiation)
-        qa = QAAgent(mode="workflow", provider="bedrock")
+        # Create QA agent with memory (OOP + Memory integration)
+        qa = _create_agent_with_memory(
+            agent_class=QAAgent,
+            agent_name="qa",
+            state=state
+        )
         
         # Pass content and analysis outputs in context
         context = {
@@ -986,12 +1311,41 @@ async def qa_agent_node(state: WorkflowGraphState) -> WorkflowGraphState:
         }
         
         # Invoke agent via OOP pattern
-        output = await _invoke_agent_with_context(
+        raw_output = await _invoke_agent_with_context(
             agent_instance=qa,
             agent_name="qa",
             state=state,
             context=context
         )
+        
+        # Parse and validate structured output
+        try:
+            qa_output = QACheckOutput(**raw_output)
+            output = qa_output.dict()
+            
+            log_agent_action(
+                agent_name=_agent_name,
+                action="qa_structured_output_validated",
+                details={
+                    "workflow_id": str(state.workflow_execution_id),
+                    "artifacts_reviewed": qa_output.summary.total_artifacts_submitted,
+                    "missing_artifacts": len(qa_output.missing_artifacts),
+                    "total_issues": qa_output.summary.total_issues_found,
+                    "overall_status": qa_output.summary.overall_status
+                }
+            )
+        except Exception as parse_error:
+            log_agent_action(
+                agent_name=_agent_name,
+                action="qa_output_validation_failed",
+                details={
+                    "error": str(parse_error),
+                    "raw_output_keys": list(raw_output.keys()) if isinstance(raw_output, dict) else "not_a_dict"
+                },
+                level="error"
+            )
+            # Use raw output as fallback
+            output = raw_output
         
         # Update task as completed
         await update_agent_task(
@@ -1040,12 +1394,16 @@ async def comms_agent_node(state: WorkflowGraphState) -> WorkflowGraphState:
     Creates Slack channels, sends notifications to project members.
     Creates notification records in database.
     
+    **STRUCTURED OUTPUT**: This node expects NotificationPlan from the agent.
+    
     Args:
         state: Current graph state
         
     Returns:
         Updated state with comms output
     """
+    from models.llm_output_models import NotificationPlan
+    
     # Get comms task
     task = await get_next_incomplete_task(
         workflow_execution_id=str(state.workflow_execution_id),
@@ -1082,8 +1440,12 @@ async def comms_agent_node(state: WorkflowGraphState) -> WorkflowGraphState:
     )
     
     try:
-        # Create Comms agent (Java-style instantiation)
-        comms = CommsAgent(mode="workflow", provider="bedrock")
+        # Create Comms agent with memory (OOP + Memory integration)
+        comms = _create_agent_with_memory(
+            agent_class=CommsAgent,
+            agent_name="comms",
+            state=state
+        )
         
         # Pass artifact export locations in context
         context = {
@@ -1092,12 +1454,40 @@ async def comms_agent_node(state: WorkflowGraphState) -> WorkflowGraphState:
         }
         
         # Invoke agent via OOP pattern
-        output = await _invoke_agent_with_context(
+        raw_output = await _invoke_agent_with_context(
             agent_instance=comms,
             agent_name="comms",
             state=state,
             context=context
         )
+        
+        # Parse and validate structured output
+        try:
+            comms_output = NotificationPlan(**raw_output)
+            output = comms_output.dict()
+            
+            log_agent_action(
+                agent_name=_agent_name,
+                action="comms_structured_output_validated",
+                details={
+                    "workflow_id": str(state.workflow_execution_id),
+                    "channels": comms_output.channels,
+                    "recipients_count": len(comms_output.recipients),
+                    "has_slack": comms_output.slack_notification is not None
+                }
+            )
+        except Exception as parse_error:
+            log_agent_action(
+                agent_name=_agent_name,
+                action="comms_output_validation_failed",
+                details={
+                    "error": str(parse_error),
+                    "raw_output_keys": list(raw_output.keys()) if isinstance(raw_output, dict) else "not_a_dict"
+                },
+                level="error"
+            )
+            # Use raw output as fallback
+            output = raw_output
         
         # Update task as completed
         await update_agent_task(
@@ -1152,12 +1542,16 @@ async def submission_agent_node(state: WorkflowGraphState) -> WorkflowGraphState
     Generates email draft, sends email with artifacts to client.
     Creates submission record in database.
     
+    **STRUCTURED OUTPUT**: This node expects EmailDraft from the agent.
+    
     Args:
         state: Current graph state
         
     Returns:
         Updated state with submission output
     """
+    from models.llm_output_models import EmailDraft
+    
     # Get submission task
     task = await get_next_incomplete_task(
         workflow_execution_id=str(state.workflow_execution_id),
@@ -1194,8 +1588,12 @@ async def submission_agent_node(state: WorkflowGraphState) -> WorkflowGraphState
     )
     
     try:
-        # Create Submission agent (Java-style instantiation)
-        submission = SubmissionAgent(mode="workflow", provider="bedrock")
+        # Create Submission agent with memory (OOP + Memory integration)
+        submission = _create_agent_with_memory(
+            agent_class=SubmissionAgent,
+            agent_name="submission",
+            state=state
+        )
         
         # Pass analysis and artifact data in context
         context = {
@@ -1205,12 +1603,40 @@ async def submission_agent_node(state: WorkflowGraphState) -> WorkflowGraphState
         }
         
         # Invoke agent via OOP pattern
-        output = await _invoke_agent_with_context(
+        raw_output = await _invoke_agent_with_context(
             agent_instance=submission,
             agent_name="submission",
             state=state,
             context=context
         )
+        
+        # Parse and validate structured output
+        try:
+            submission_output = EmailDraft(**raw_output)
+            output = submission_output.dict()
+            
+            log_agent_action(
+                agent_name=_agent_name,
+                action="submission_structured_output_validated",
+                details={
+                    "workflow_id": str(state.workflow_execution_id),
+                    "to_recipients": len(submission_output.to),
+                    "has_subject": bool(submission_output.subject),
+                    "attachments_count": len(submission_output.attachments)
+                }
+            )
+        except Exception as parse_error:
+            log_agent_action(
+                agent_name=_agent_name,
+                action="submission_output_validation_failed",
+                details={
+                    "error": str(parse_error),
+                    "raw_output_keys": list(raw_output.keys()) if isinstance(raw_output, dict) else "not_a_dict"
+                },
+                level="error"
+            )
+            # Use raw output as fallback
+            output = raw_output
         
         # Update task as completed
         await update_agent_task(
