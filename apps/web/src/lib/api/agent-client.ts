@@ -1,17 +1,21 @@
 /**
- * Agent Client Library - BFF Pattern Implementation
+ * Agent Client Library - Dual Mode Support
  * 
- * This library provides a unified interface for invoking AI agents in both
- * local (docker-compose) and remote (AWS AgentCore Runtime) environments.
+ * This library provides separate client-side and server-side functions:
  * 
- * Architecture:
- * - Local Mode: Direct HTTP calls to FastAPI endpoints (localhost:8001, localhost:8002)
- * - Remote Mode: AWS SDK calls to AgentCore Runtime with proper IAM authentication
+ * CLIENT-SIDE (Browser):
+ * - Always calls Next.js BFF API routes (/api/workflow-agents/invocations)
+ * - No AWS SDK exposure
+ * - Only uses public environment variables (NEXT_PUBLIC_*)
  * 
- * Security:
- * - All agent invocations go through Next.js BFF API routes (not direct from client)
- * - AWS credentials are server-side only
- * - Client uses fetch to Next.js API routes which handle the actual agent calls
+ * SERVER-SIDE (API Routes):
+ * - Uses AWS SDK for remote mode
+ * - Direct HTTP calls for local mode
+ * - Has access to private environment variables
+ * 
+ * Security Model:
+ * - AWS credentials never exposed to browser
+ * - All sensitive operations happen server-side only
  */
 
 import { 
@@ -35,7 +39,7 @@ export interface AgentInvocationPayload {
   start: boolean;
   user_input?: {
     chat?: string;
-    content_edits?: Record<string, any>;
+    content_edits?: Record<string, unknown>;
   };
 }
 
@@ -50,15 +54,40 @@ export interface AgentConfig {
   region?: string;
 }
 
-export interface StreamChunk {
-  type: 'event' | 'data' | 'error' | 'complete';
-  data?: any;
-  error?: string;
-}
+// ============================================
+// CLIENT-SIDE FUNCTIONS (Browser Only)
+// ============================================
 
-// ============================================
-// Session ID Generation
-// ============================================
+/**
+ * BFF API route endpoint - single source of truth
+ */
+const BFF_AGENT_INVOCATIONS_URL = '/api/workflow-agents/invocations';
+
+/**
+ * CLIENT-SIDE: Invokes agent through BFF API route
+ * This is the ONLY function that frontend hooks should call
+ * 
+ * @param payload - Agent invocation payload
+ * @returns Response with streaming body (SSE format)
+ */
+export async function invokeBFFAgent(
+  payload: AgentInvocationPayload & { agent_type?: AgentType }
+): Promise<Response> {
+  const response = await fetch(BFF_AGENT_INVOCATIONS_URL, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const errorData = await response.json().catch(() => ({ error: 'Unknown error' }));
+    throw new Error(errorData.error || `Agent invocation failed: ${response.status}`);
+  }
+
+  return response;
+}
 
 /**
  * Generates a unique session ID for agent conversations
@@ -71,13 +100,19 @@ export function generateSessionId(): string {
 }
 
 // ============================================
-// Environment Configuration
+// SERVER-SIDE FUNCTIONS (API Routes Only)
 // ============================================
 
 /**
- * Gets agent configuration from environment variables
+ * SERVER-SIDE: Gets agent configuration from environment variables
+ * Uses both public and private env vars (only available server-side)
  */
 export function getAgentConfig(type: AgentType): AgentConfig {
+  // Check if we're running server-side
+  if (typeof window !== 'undefined') {
+    throw new Error('getAgentConfig() should only be called server-side');
+  }
+
   const mode = (process.env.NEXT_PUBLIC_AGENT_MODE || 'local') as AgentMode;
   
   if (mode === 'local') {
@@ -92,7 +127,7 @@ export function getAgentConfig(type: AgentType): AgentConfig {
     };
   }
   
-  // Remote mode
+  // Remote mode - uses PRIVATE env vars (not exposed to client)
   const runtimeArn = type === 'workflow'
     ? process.env.WORKFLOW_AGENT_RUNTIME_ARN
     : process.env.AI_ASSISTANT_AGENT_RUNTIME_ARN;
@@ -116,17 +151,17 @@ export function getAgentConfig(type: AgentType): AgentConfig {
   };
 }
 
-// ============================================
-// Local Agent Client
-// ============================================
-
 /**
- * Invokes agent in local docker-compose environment
+ * SERVER-SIDE: Invokes agent in local docker-compose environment
  */
 async function invokeLocalAgent(
   config: AgentConfig,
   payload: AgentInvocationPayload
 ): Promise<Response> {
+  if (typeof window !== 'undefined') {
+    throw new Error('invokeLocalAgent() should only be called server-side');
+  }
+
   if (!config.localUrl) {
     throw new Error('Local URL not configured');
   }
@@ -150,33 +185,14 @@ async function invokeLocalAgent(
 }
 
 /**
- * Opens SSE stream to local agent
- */
-export function streamLocalAgent(
-  config: AgentConfig,
-  projectId: string,
-  workflowExecutionId: string
-): EventSource {
-  if (!config.localUrl) {
-    throw new Error('Local URL not configured');
-  }
-  
-  const url = new URL(`${config.localUrl}/invocations/stream`);
-  url.searchParams.set('projectId', projectId);
-  url.searchParams.set('workflowExecutionId', workflowExecutionId);
-  
-  return new EventSource(url.toString());
-}
-
-// ============================================
-// Remote Agent Client (AWS SDK)
-// ============================================
-
-/**
- * Creates AWS SDK client for AgentCore
- * Server-side only - uses IAM credentials
+ * SERVER-SIDE: Creates AWS SDK client for AgentCore
+ * Uses IAM credentials - never exposed to client
  */
 function createAgentCoreClient(region: string): BedrockAgentCoreClient {
+  if (typeof window !== 'undefined') {
+    throw new Error('createAgentCoreClient() should only be called server-side');
+  }
+
   return new BedrockAgentCoreClient({
     region,
     // In production, credentials are provided by IAM role
@@ -186,18 +202,21 @@ function createAgentCoreClient(region: string): BedrockAgentCoreClient {
 }
 
 /**
- * Invokes agent in remote AWS AgentCore Runtime with SDK-based streaming
- * Server-side only
- *
+ * SERVER-SIDE: Invokes agent in remote AWS AgentCore Runtime with SDK-based streaming
+ * 
  * This follows the AWS AgentCore pattern where:
  * 1. Session ID is passed via runtimeSessionId parameter
  * 2. Response is streamed as Server-Sent Events (SSE)
  * 3. Each event has "data:" prefix followed by JSON
  */
-export async function invokeRemoteAgent(
+async function invokeRemoteAgent(
   config: AgentConfig,
   payload: AgentInvocationPayload
 ): Promise<ReadableStream<Uint8Array>> {
+  if (typeof window !== 'undefined') {
+    throw new Error('invokeRemoteAgent() should only be called server-side');
+  }
+
   if (!config.runtimeArn || !config.region) {
     throw new Error('Remote agent configuration incomplete');
   }
@@ -227,13 +246,16 @@ export async function invokeRemoteAgent(
 }
 
 /**
- * Stream version for POST endpoint - returns SSE formatted stream
- * This is the main function used by the BFF for remote mode streaming
+ * SERVER-SIDE: Stream version for POST endpoint - returns SSE formatted stream
  */
 export async function invokeRemoteAgentStream(
   type: AgentType,
   payload: AgentInvocationPayload
 ): Promise<ReadableStream<Uint8Array>> {
+  if (typeof window !== 'undefined') {
+    throw new Error('invokeRemoteAgentStream() should only be called server-side');
+  }
+
   const config = getAgentConfig(type);
   
   if (config.mode !== 'remote') {
@@ -244,8 +266,7 @@ export async function invokeRemoteAgentStream(
 }
 
 /**
- * Converts AWS SDK stream to Web ReadableStream with SSE format
- * Ensures each event has "data:" prefix for proper SSE parsing
+ * SERVER-SIDE: Converts AWS SDK stream to Web ReadableStream with SSE format
  */
 async function convertAWSStreamToSSE(
   awsStream: unknown
@@ -289,18 +310,18 @@ async function convertAWSStreamToSSE(
   });
 }
 
-// ============================================
-// Unified Client Interface
-// ============================================
-
 /**
- * Invokes an agent with automatic mode detection
- * This function should be called from Next.js API routes only (server-side)
+ * SERVER-SIDE: Invokes an agent with automatic mode detection
+ * This function should ONLY be called from Next.js API routes
  */
 export async function invokeAgent(
   type: AgentType,
   payload: AgentInvocationPayload
 ): Promise<Response | ReadableStream<Uint8Array>> {
+  if (typeof window !== 'undefined') {
+    throw new Error('invokeAgent() should only be called server-side from API routes');
+  }
+
   const config = getAgentConfig(type);
   
   if (config.mode === 'local') {
@@ -311,108 +332,17 @@ export async function invokeAgent(
 }
 
 /**
- * Opens an SSE stream for agent updates
- * For local mode, connects directly to agent SSE endpoint
- * For remote mode, should connect through BFF proxy
- */
-export function streamAgent(
-  type: AgentType,
-  projectId: string,
-  workflowExecutionId: string
-): EventSource | null {
-  const config = getAgentConfig(type);
-  
-  if (config.mode === 'local') {
-    return streamLocalAgent(config, projectId, workflowExecutionId);
-  } else {
-    // For remote mode, streaming is handled through the BFF proxy
-    // Return null - client should use BFF route instead
-    return null;
-  }
-}
-
-// ============================================
-// Error Handling Utilities
-// ============================================
-
-export class AgentInvocationError extends Error {
-  constructor(
-    message: string,
-    public readonly type: 'validation' | 'not_found' | 'access_denied' | 'throttling' | 'unknown',
-    public readonly originalError?: Error
-  ) {
-    super(message);
-    this.name = 'AgentInvocationError';
-  }
-}
-
-/**
- * Parses AWS SDK errors into structured error types
- */
-export function parseAgentError(error: any): AgentInvocationError {
-  const errorName = error.name || error.__type || 'Unknown';
-  const errorMessage = error.message || 'Unknown error';
-  
-  switch (errorName) {
-    case 'ValidationException':
-      return new AgentInvocationError(
-        `Invalid request: ${errorMessage}`,
-        'validation',
-        error
-      );
-    case 'ResourceNotFoundException':
-      return new AgentInvocationError(
-        `Agent not found: ${errorMessage}`,
-        'not_found',
-        error
-      );
-    case 'AccessDeniedException':
-      return new AgentInvocationError(
-        `Access denied: ${errorMessage}`,
-        'access_denied',
-        error
-      );
-    case 'ThrottlingException':
-      return new AgentInvocationError(
-        `Rate limit exceeded: ${errorMessage}`,
-        'throttling',
-        error
-      );
-    default:
-      return new AgentInvocationError(
-        `Agent invocation failed: ${errorMessage}`,
-        'unknown',
-        error
-      );
-  }
-}
-
-// ============================================
-// Retry Logic
-// ============================================
-
-export interface RetryOptions {
-  maxAttempts?: number;
-  initialDelay?: number;
-  maxDelay?: number;
-  backoffMultiplier?: number;
-}
-
-const defaultRetryOptions: Required<RetryOptions> = {
-  maxAttempts: 3,
-  initialDelay: 1000,
-  maxDelay: 30000,
-  backoffMultiplier: 2,
-};
-
-/**
- * Retries agent invocation with exponential backoff
+ * SERVER-SIDE: Retries agent invocation with exponential backoff
  */
 export async function invokeAgentWithRetry(
   type: AgentType,
   payload: AgentInvocationPayload,
   options: RetryOptions = {}
 ): Promise<Response | ReadableStream<Uint8Array>> {
+  if (typeof window !== 'undefined') {
+    throw new Error('invokeAgentWithRetry() should only be called server-side');
+  }
+
   const opts = { ...defaultRetryOptions, ...options };
   let lastError: Error | null = null;
   
@@ -444,3 +374,79 @@ export async function invokeAgentWithRetry(
   
   throw lastError || new Error('Agent invocation failed after all retry attempts');
 }
+
+// ============================================
+// Error Handling Utilities (Used by both)
+// ============================================
+
+export class AgentInvocationError extends Error {
+  constructor(
+    message: string,
+    public readonly type: 'validation' | 'not_found' | 'access_denied' | 'throttling' | 'unknown',
+    public readonly originalError?: Error
+  ) {
+    super(message);
+    this.name = 'AgentInvocationError';
+  }
+}
+
+/**
+ * Parses AWS SDK errors into structured error types
+ */
+export function parseAgentError(error: unknown): AgentInvocationError {
+  // Type guard for error objects
+  const err = error as { name?: string; __type?: string; message?: string };
+  const errorName = err.name || err.__type || 'Unknown';
+  const errorMessage = err.message || 'Unknown error';
+  
+  switch (errorName) {
+    case 'ValidationException':
+      return new AgentInvocationError(
+        `Invalid request: ${errorMessage}`,
+        'validation',
+        error instanceof Error ? error : undefined
+      );
+    case 'ResourceNotFoundException':
+      return new AgentInvocationError(
+        `Agent not found: ${errorMessage}`,
+        'not_found',
+        error instanceof Error ? error : undefined
+      );
+    case 'AccessDeniedException':
+      return new AgentInvocationError(
+        `Access denied: ${errorMessage}`,
+        'access_denied',
+        error instanceof Error ? error : undefined
+      );
+    case 'ThrottlingException':
+      return new AgentInvocationError(
+        `Rate limit exceeded: ${errorMessage}`,
+        'throttling',
+        error instanceof Error ? error : undefined
+      );
+    default:
+      return new AgentInvocationError(
+        `Agent invocation failed: ${errorMessage}`,
+        'unknown',
+        error instanceof Error ? error : undefined
+      );
+  }
+}
+
+// ============================================
+// Retry Logic Types
+// ============================================
+
+export interface RetryOptions {
+  maxAttempts?: number;
+  initialDelay?: number;
+  maxDelay?: number;
+  backoffMultiplier?: number;
+}
+
+const defaultRetryOptions: Required<RetryOptions> = {
+  maxAttempts: 3,
+  initialDelay: 1000,
+  maxDelay: 30000,
+  backoffMultiplier: 2,
+};
