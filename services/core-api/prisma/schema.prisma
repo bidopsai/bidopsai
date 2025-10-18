@@ -46,6 +46,7 @@ model User {
   createdIntegrations     Integration[]
   uploadedKBDocuments     KnowledgeBaseDocument[]
   createdArtifactVersions ArtifactVersion[]
+  conversationMessages    ConversationMessage[]
 
   @@map("users")
   @@index([email])
@@ -119,14 +120,15 @@ model Project {
   metadata           Json?
 
   // Relations
-  creator            User                @relation("ProjectCreator", fields: [createdBy], references: [id])
-  completer          User?               @relation("ProjectCompleter", fields: [completedBy], references: [id])
-  members            ProjectMember[]
-  documents          ProjectDocument[]
-  knowledgeBases     KnowledgeBase[]
-  artifacts          Artifact[]
-  workflowExecutions WorkflowExecution[]
-  submissions        SubmissionRecord[]
+  creator              User                  @relation("ProjectCreator", fields: [createdBy], references: [id])
+  completer            User?                 @relation("ProjectCompleter", fields: [completedBy], references: [id])
+  members              ProjectMember[]
+  documents            ProjectDocument[]
+  knowledgeBases       KnowledgeBase[]
+  artifacts            Artifact[]
+  workflowExecutions   WorkflowExecution[]
+  submissions          SubmissionRecord[]
+  conversationMessages ConversationMessage[]
 
   @@map("projects")
   @@index([status, createdAt])
@@ -178,19 +180,21 @@ model ProjectMember {
 // ============================================
 
 model WorkflowExecution {
-  id             String    @id @default(uuid()) @db.Uuid
-  projectId      String    @map("project_id") @db.Uuid
-  status         String    @default("OPEN")
-  initiatedBy    String    @map("initiated_by") @db.Uuid
-  handledBy      String?   @map("handled_by") @db.Uuid
-  completedBy    String?   @map("completed_by") @db.Uuid
-  startedAt      DateTime  @default(now()) @map("started_at")
-  completedAt    DateTime? @map("completed_at")
-  lastUpdatedAt  DateTime  @updatedAt @map("last_updated_at")
-  workflowConfig Json?     @map("workflow_config")
-  errorLog       Json?     @map("error_log")
-  errorMessage   String?   @map("error_message") @db.Text
-  results        Json?
+  id                       String    @id @default(uuid()) @db.Uuid
+  projectId                String    @map("project_id") @db.Uuid
+  status                   String    @default("OPEN")
+  initiatedBy              String    @map("initiated_by") @db.Uuid
+  handledBy                String?   @map("handled_by") @db.Uuid
+  completedBy              String?   @map("completed_by") @db.Uuid
+  startedAt                DateTime  @default(now()) @map("started_at")
+  completedAt              DateTime? @map("completed_at")
+  lastUpdatedAt            DateTime  @updatedAt @map("last_updated_at")
+  workflowConfig           Json?     @map("workflow_config")
+  errorLog                 Json?     @map("error_log")
+  errorMessage             String?   @map("error_message") @db.Text
+  results                  Json?
+  sessionId                String?   @map("session_id") @db.VarChar(255)
+  conversationMessageCount Int?      @default(0) @map("conversation_message_count")
 
   // Relations
   project    Project     @relation(fields: [projectId], references: [id], onDelete: Cascade)
@@ -199,6 +203,7 @@ model WorkflowExecution {
   @@map("workflow_executions")
   @@index([projectId, status])
   @@index([status, lastUpdatedAt])
+  @@index([sessionId])
 }
 
 model AgentTask {
@@ -225,6 +230,30 @@ model AgentTask {
   @@map("agent_tasks")
   @@index([workflowExecutionId, sequenceOrder])
   @@index([status])
+}
+
+// ============================================
+// CONVERSATION MANAGEMENT
+// ============================================
+
+model ConversationMessage {
+  id        String   @id @default(dbgenerated("gen_random_uuid()")) @db.Uuid
+  projectId String   @map("project_id") @db.Uuid
+  sessionId String   @map("session_id") @db.VarChar(255)
+  userId    String   @map("user_id") @db.Uuid
+  role      String   @db.VarChar(50) // 'user', 'assistant', or 'system'
+  content   Json
+  metadata  Json?    @default("{}")
+  createdAt DateTime @default(now()) @map("created_at")
+
+  // Relations
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation(fields: [userId], references: [id])
+
+  @@map("conversation_messages")
+  @@index([projectId, sessionId])
+  @@index([userId])
+  @@index([createdAt(sort: Desc)])
 }
 
 // ============================================

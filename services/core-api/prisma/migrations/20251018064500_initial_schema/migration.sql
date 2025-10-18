@@ -113,6 +113,8 @@ CREATE TABLE "workflow_executions" (
     "error_log" JSONB,
     "error_message" TEXT,
     "results" JSONB,
+    "session_id" VARCHAR(255),
+    "conversation_message_count" INTEGER DEFAULT 0,
 
     CONSTRAINT "workflow_executions_pkey" PRIMARY KEY ("id")
 );
@@ -137,6 +139,20 @@ CREATE TABLE "agent_tasks" (
     "execution_time_seconds" DOUBLE PRECISION,
 
     CONSTRAINT "agent_tasks_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "conversation_messages" (
+    "id" UUID NOT NULL DEFAULT gen_random_uuid(),
+    "project_id" UUID NOT NULL,
+    "session_id" VARCHAR(255) NOT NULL,
+    "user_id" UUID NOT NULL,
+    "role" VARCHAR(50) NOT NULL,
+    "content" JSONB NOT NULL,
+    "metadata" JSONB DEFAULT '{}',
+    "created_at" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "conversation_messages_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -383,10 +399,22 @@ CREATE INDEX "workflow_executions_project_id_status_idx" ON "workflow_executions
 CREATE INDEX "workflow_executions_status_last_updated_at_idx" ON "workflow_executions"("status", "last_updated_at");
 
 -- CreateIndex
+CREATE INDEX "workflow_executions_session_id_idx" ON "workflow_executions"("session_id");
+
+-- CreateIndex
 CREATE INDEX "agent_tasks_workflow_execution_id_sequence_order_idx" ON "agent_tasks"("workflow_execution_id", "sequence_order");
 
 -- CreateIndex
 CREATE INDEX "agent_tasks_status_idx" ON "agent_tasks"("status");
+
+-- CreateIndex
+CREATE INDEX "conversation_messages_project_id_session_id_idx" ON "conversation_messages"("project_id", "session_id");
+
+-- CreateIndex
+CREATE INDEX "conversation_messages_user_id_idx" ON "conversation_messages"("user_id");
+
+-- CreateIndex
+CREATE INDEX "conversation_messages_created_at_idx" ON "conversation_messages"("created_at" DESC);
 
 -- CreateIndex
 CREATE INDEX "artifacts_project_id_status_idx" ON "artifacts"("project_id", "status");
@@ -482,10 +510,19 @@ ALTER TABLE "project_members" ADD CONSTRAINT "project_members_project_id_fkey" F
 ALTER TABLE "project_members" ADD CONSTRAINT "project_members_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
+ALTER TABLE "project_members" ADD CONSTRAINT "project_members_added_by_id_fkey" FOREIGN KEY ("added_by_id") REFERENCES "users"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
+
+-- AddForeignKey
 ALTER TABLE "workflow_executions" ADD CONSTRAINT "workflow_executions_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "projects"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "agent_tasks" ADD CONSTRAINT "agent_tasks_workflow_execution_id_fkey" FOREIGN KEY ("workflow_execution_id") REFERENCES "workflow_executions"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "conversation_messages" ADD CONSTRAINT "conversation_messages_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "projects"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+-- AddForeignKey
+ALTER TABLE "conversation_messages" ADD CONSTRAINT "conversation_messages_user_id_fkey" FOREIGN KEY ("user_id") REFERENCES "users"("id") ON DELETE RESTRICT ON UPDATE CASCADE;
 
 -- AddForeignKey
 ALTER TABLE "artifacts" ADD CONSTRAINT "artifacts_project_id_fkey" FOREIGN KEY ("project_id") REFERENCES "projects"("id") ON DELETE CASCADE ON UPDATE CASCADE;
