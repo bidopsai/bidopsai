@@ -231,7 +231,7 @@ jobs:
         with:
           images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO_APP }}
           tags: |
-            type=sha,prefix={{branch}}-,format=short
+            type=sha,prefix={{branch}},format=short
             type=raw,value=latest,enable={{is_default_branch}}
           flavor: |
             latest=false
@@ -290,7 +290,7 @@ jobs:
         with:
           images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO_AGENT }}
           tags: |
-            type=sha,prefix={{branch}}-,format=short
+            type=sha,prefix={{branch}},format=short
             type=raw,value=latest,enable={{is_default_branch}}
           flavor: |
             latest=false
