@@ -12,6 +12,16 @@ on:
         required: false
         default: false
         type: boolean
+      scan_only:
+        description: "Run security scan only (no build)"
+        required: false
+        default: false
+        type: boolean
+      scan_tag:
+        description: "Tag to scan (e.g., develop-abc123d or latest)"
+        required: false
+        default: "latest"
+        type: string
 
 env:
   AWS_REGION: us-east-1
@@ -194,6 +204,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: changes
     if: github.event_name == 'push' || github.event.inputs.force_rebuild == 'true'
+    outputs:
+      image-tag: ${{ steps.meta.outputs.version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -244,12 +256,15 @@ jobs:
           echo "✅ Frontend image pushed successfully"
           echo "📦 Repository: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO_APP }}"
           echo "🏷️  Tags: ${{ steps.meta.outputs.tags }}"
+          echo "🔖 Version for scanning: ${{ steps.meta.outputs.version }}"
 
   build-agent:
     name: Build & Push AgentCore
     runs-on: ubuntu-latest
     needs: changes
     if: (needs.changes.outputs.agent == 'true' && (github.event_name == 'push' || github.event.inputs.force_rebuild == 'true')) || github.event.inputs.force_rebuild == 'true'
+    outputs:
+      image-tag: ${{ steps.meta.outputs.version }}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -294,6 +309,7 @@ jobs:
           echo "✅ AgentCore image pushed successfully"
           echo "📦 Repository: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO_AGENT }}"
           echo "🏷️  Tags: ${{ steps.meta.outputs.tags }}"
+          echo "🔖 Version for scanning: ${{ steps.meta.outputs.version }}"
 
   # ============================================================================
   # SECURITY SCANNING
@@ -302,7 +318,13 @@ jobs:
     name: Security Scan
     runs-on: ubuntu-latest
     needs: [changes, build-app, build-agent]
-    if: always() && (needs.build-app.result == 'success' || needs.build-agent.result == 'success')
+    # Run if: builds succeeded OR manual scan_only trigger
+    if: |
+      always() && (
+        github.event.inputs.scan_only == 'true' ||
+        needs.build-app.result == 'success' ||
+        needs.build-agent.result == 'success'
+      )
     permissions:
       id-token: write
       contents: read
@@ -311,50 +333,69 @@ jobs:
       matrix:
         include:
           - service: app
-            repo: ${{ needs.build-app.result == 'success' && 'bidopsai/app' || '' }}
+            repo: bidopsai/app
+            # Use scan_tag if manual, otherwise use build output
+            tag: ${{ github.event.inputs.scan_only == 'true' && github.event.inputs.scan_tag || needs.build-app.outputs.image-tag }}
+            skip: ${{ github.event.inputs.scan_only != 'true' && needs.build-app.result != 'success' }}
           - service: agent
-            repo: ${{ needs.build-agent.result == 'success' && 'bidopsai/agent' || '' }}
+            repo: bidopsai/agent
+            # Use scan_tag if manual, otherwise use build output
+            tag: ${{ github.event.inputs.scan_only == 'true' && github.event.inputs.scan_tag || needs.build-agent.outputs.image-tag }}
+            skip: ${{ github.event.inputs.scan_only != 'true' && needs.build-agent.result != 'success' }}
     steps:
-      - name: Skip if service wasn't built
-        if: matrix.repo == ''
+      - name: Skip if not applicable
+        if: matrix.skip == 'true'
         run: |
-          echo "Service ${{ matrix.service }} was not built, skipping scan"
+          echo "⏭️ Skipping ${{ matrix.service }} - not built in this run"
           exit 0
 
       - name: Checkout code
-        if: matrix.repo != ''
+        if: matrix.skip != 'true'
         uses: actions/checkout@v4
 
       - name: Configure AWS credentials
-        if: matrix.repo != ''
+        if: matrix.skip != 'true'
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to Amazon ECR
-        if: matrix.repo != ''
+        if: matrix.skip != 'true'
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Get image tag from build
-        if: matrix.repo != ''
-        id: get-tag
+      - name: Display scan details
+        if: matrix.skip != 'true'
         run: |
-          # Use the SHA-based tag we just built
-          TAG="${{ github.ref_name }}-${{ github.sha }}"
-          echo "tag=${TAG:0:14}" >> $GITHUB_OUTPUT
+          echo "📦 Scanning image: ${{ steps.login-ecr.outputs.registry }}/${{ matrix.repo }}:${{ matrix.tag }}"
+          echo "🔍 Service: ${{ matrix.service }}"
+          echo "🎯 Scan mode: ${{ github.event.inputs.scan_only == 'true' && 'Manual' || 'Post-Build' }}"
 
       - name: Run Trivy vulnerability scanner
-        if: matrix.repo != ''
+        if: matrix.skip != 'true'
+        id: trivy-scan
+        continue-on-error: true
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: "${{ steps.login-ecr.outputs.registry }}/${{ matrix.repo }}:${{ steps.get-tag.outputs.tag }}"
+          image-ref: "${{ steps.login-ecr.outputs.registry }}/${{ matrix.repo }}:${{ matrix.tag }}"
           format: "sarif"
           output: "trivy-results-${{ matrix.service }}.sarif"
 
+      - name: Check if SARIF file was created
+        if: matrix.skip != 'true'
+        id: check-sarif
+        run: |
+          if [ -f "trivy-results-${{ matrix.service }}.sarif" ]; then
+            echo "sarif-exists=true" >> $GITHUB_OUTPUT
+            echo "✅ SARIF file created successfully"
+          else
+            echo "sarif-exists=false" >> $GITHUB_OUTPUT
+            echo "⚠️ SARIF file was not created (scan may have failed)"
+          fi
+
       - name: Upload Trivy scan results to GitHub Security tab
-        if: always() && matrix.repo != ''
+        if: matrix.skip != 'true' && steps.check-sarif.outputs.sarif-exists == 'true'
         uses: github/codeql-action/upload-sarif@v3
         with:
           sarif_file: "trivy-results-${{ matrix.service }}.sarif"
