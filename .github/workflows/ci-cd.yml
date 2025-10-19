@@ -12,11 +12,6 @@ on:
         required: false
         default: false
         type: boolean
-      scan_only:
-        description: "Run security scan only (no build)"
-        required: false
-        default: false
-        type: boolean
       scan_tag:
         description: "Tag to scan (e.g., develop-abc123d or latest)"
         required: false
@@ -41,7 +36,6 @@ jobs:
   # ============================================================================
   pre-commit:
     runs-on: ubuntu-latest
-    if: github.event.inputs.scan_only != 'true'
 
     steps:
       - uses: actions/checkout@v4
@@ -73,7 +67,6 @@ jobs:
     name: Detect Changes
     runs-on: ubuntu-latest
     needs: pre-commit
-    if: always() && github.event.inputs.scan_only != 'true'
     outputs:
       app: ${{ steps.changes.outputs.app }}
       agent: ${{ steps.changes.outputs.agent }}
