@@ -72,6 +72,7 @@ jobs:
     name: Detect Changes
     runs-on: ubuntu-latest
     needs: pre-commit
+    if: github.event.inputs.scan_only != 'true'
     outputs:
       app: ${{ steps.changes.outputs.app }}
       agent: ${{ steps.changes.outputs.agent }}
@@ -203,7 +204,7 @@ jobs:
     name: Build & Push Frontend
     runs-on: ubuntu-latest
     needs: changes
-    if: github.event_name == 'push' || github.event.inputs.force_rebuild == 'true'
+    if: github.event.inputs.scan_only != 'true' && (github.event_name == 'push' || github.event.inputs.force_rebuild == 'true')
     outputs:
       image-tag: ${{ steps.meta.outputs.version }}
     steps:
@@ -262,7 +263,7 @@ jobs:
     name: Build & Push AgentCore
     runs-on: ubuntu-latest
     needs: changes
-    if: (needs.changes.outputs.agent == 'true' && (github.event_name == 'push' || github.event.inputs.force_rebuild == 'true')) || github.event.inputs.force_rebuild == 'true'
+    if: github.event.inputs.scan_only != 'true' && ((needs.changes.outputs.agent == 'true' && (github.event_name == 'push' || github.event.inputs.force_rebuild == 'true')) || github.event.inputs.force_rebuild == 'true')
     outputs:
       image-tag: ${{ steps.meta.outputs.version }}
     steps:
@@ -317,8 +318,9 @@ jobs:
   security-scan:
     name: Security Scan
     runs-on: ubuntu-latest
+    # Make needs optional by checking if jobs completed or skipped
     needs: [changes, build-app, build-agent]
-    # Run if: builds succeeded OR manual scan_only trigger
+    # Always run if manual scan, otherwise run if builds succeeded
     if: |
       always() && (
         github.event.inputs.scan_only == 'true' ||
