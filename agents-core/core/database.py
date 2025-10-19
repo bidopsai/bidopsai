@@ -76,7 +76,15 @@ class DatabasePool:
             return
         
         config = get_config()
-        database_url = config.database_url
+        
+        # Parse DATABASE_URL into individual components (like copilot code)
+        import re
+        # Format: postgresql://user:password@host:port/database
+        match = re.match(r'postgresql://([^:]+):([^@]+)@([^:]+):(\d+)/(.+)', config.database_url)
+        if not match:
+            raise DatabaseConnectionError(f"Invalid DATABASE_URL format: {config.database_url}")
+        
+        db_user, db_password, db_host, db_port, db_name = match.groups()
         
         retry_count = 0
         last_error = None
@@ -84,9 +92,15 @@ class DatabasePool:
         while retry_count < max_retries:
             try:
                 logger.info(f"Initializing database pool (attempt {retry_count + 1}/{max_retries})...")
+                logger.info(f"Connecting to {db_host}:{db_port}/{db_name} as {db_user}")
                 
+                # Use individual parameters instead of DSN (like working copilot code)
                 self._pool = await asyncpg.create_pool(
-                    dsn=database_url,
+                    host=db_host,
+                    port=int(db_port),
+                    database=db_name,
+                    user=db_user,
+                    password=db_password,
                     min_size=min_size,
                     max_size=max_size,
                     max_queries=max_queries,
@@ -101,6 +115,8 @@ class DatabasePool:
                 
                 # Test connection
                 async with self._pool.acquire() as conn:
+                    version = await conn.fetchval('SELECT version()')
+                    logger.info(f"PostgreSQL version: {version[:100]}...")
                     await conn.fetchval('SELECT 1')
                 
                 self._initialized = True

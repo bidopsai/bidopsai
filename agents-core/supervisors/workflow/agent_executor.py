@@ -89,6 +89,10 @@ async def startup_event():
     - Observability (LangFuse, OTEL)
     - Tool configuration
     """
+    print("=" * 80)
+    print("STARTUP EVENT TRIGGERED - Beginning initialization")
+    print("=" * 80)
+    
     log_agent_action(
         agent_name="workflow_executor",
         action="startup_begin",
@@ -96,8 +100,10 @@ async def startup_event():
     )
     
     try:
+        print("Calling init_database()...")
         # Initialize core services
         await init_database()  # Creates singleton database pool
+        print("Database initialization completed!")
         
         # Initialize memory manager (AgentCore Memory integrated via Phase 4)
         get_memory_manager()  # Creates singleton memory manager
