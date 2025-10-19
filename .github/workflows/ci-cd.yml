@@ -194,6 +194,7 @@ jobs:
     needs: changes
     outputs:
       image-tag: ${{ steps.meta.outputs.version }}
+    if: github.event_name == 'push' || github.event.inputs.force_rebuild == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -251,6 +252,7 @@ jobs:
     needs: changes
     outputs:
       image-tag: ${{ steps.meta.outputs.version }}
+    if: (needs.changes.outputs.agent == 'true' && (github.event_name == 'push' || github.event.inputs.force_rebuild == 'true')) || github.event.inputs.force_rebuild == 'true'
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
