@@ -86,28 +86,51 @@ export class IAMStack extends cdk.Stack {
   private createWorkflowAgentRole(environment: string): iam.Role {
     const role = new iam.Role(this, 'WorkflowAgentRole', {
       roleName: `BidOpsAI-WorkflowAgent-${environment}`,
-      description: 'IAM role for Workflow Supervisor Agent',
-      assumedBy: new iam.CompositePrincipal(
-        new iam.ServicePrincipal('bedrock.amazonaws.com'),
-        new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
-        new iam.ServicePrincipal('lambda.amazonaws.com'),
-      ),
+      description: 'IAM role for Workflow Supervisor Agent - AgentCore Runtime',
+      assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
     });
 
-    // Bedrock model access
+    // ECR Image Access (required by AgentCore to pull container images)
     role.addToPolicy(
       new iam.PolicyStatement({
-        sid: 'BedrockModelAccess',
+        sid: 'ECRImageAccess',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'ecr:BatchGetImage',
+          'ecr:GetDownloadUrlForLayer',
+        ],
+        resources: [`arn:aws:ecr:${this.region}:${this.account}:repository/*`],
+      })
+    );
+
+    // ECR Token Access (required by AgentCore)
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ECRTokenAccess',
+        effect: iam.Effect.ALLOW,
+        actions: ['ecr:GetAuthorizationToken'],
+        resources: ['*'],
+      })
+    );
+
+    // Bedrock model access (including Converse API and Inference Profiles)
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'BedrockModelInvocation',
         effect: iam.Effect.ALLOW,
         actions: [
           'bedrock:InvokeModel',
           'bedrock:InvokeModelWithResponseStream',
+          'bedrock:Converse',
+          'bedrock:ConverseStream',
           'bedrock:ListFoundationModels',
           'bedrock:GetFoundationModel',
         ],
         resources: [
-          `arn:aws:bedrock:${this.region}::foundation-model/anthropic.*`,
-          `arn:aws:bedrock:${this.region}::foundation-model/amazon.*`,
+          'arn:aws:bedrock:*::foundation-model/*',
+          `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/*`,
+          `arn:aws:bedrock:*:${this.account}:inference-profile/*`,
+          `arn:aws:bedrock:${this.region}:${this.account}:*`,
         ],
       })
     );
@@ -176,24 +199,41 @@ export class IAMStack extends cdk.Stack {
       })
     );
 
-    // CloudWatch Logs
+    // CloudWatch Logs (required by AgentCore runtime)
     role.addToPolicy(
       new iam.PolicyStatement({
-        sid: 'CloudWatchLogs',
+        sid: 'CloudWatchLogsDescribe',
         effect: iam.Effect.ALLOW,
         actions: [
-          'logs:CreateLogGroup',
-          'logs:CreateLogStream',
-          'logs:PutLogEvents',
           'logs:DescribeLogStreams',
+          'logs:CreateLogGroup',
         ],
-        resources: [
-          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/agentcore/workflow-agent/*`,
-        ],
+        resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock-agentcore/runtimes/*`],
       })
     );
 
-    // X-Ray tracing
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'CloudWatchLogsDescribeAll',
+        effect: iam.Effect.ALLOW,
+        actions: ['logs:DescribeLogGroups'],
+        resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:*`],
+      })
+    );
+
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'CloudWatchLogsWrite',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'logs:CreateLogStream',
+          'logs:PutLogEvents',
+        ],
+        resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*`],
+      })
+    );
+
+    // X-Ray tracing (required by AgentCore runtime)
     role.addToPolicy(
       new iam.PolicyStatement({
         sid: 'XRayTracing',
@@ -201,8 +241,42 @@ export class IAMStack extends cdk.Stack {
         actions: [
           'xray:PutTraceSegments',
           'xray:PutTelemetryRecords',
+          'xray:GetSamplingRules',
+          'xray:GetSamplingTargets',
         ],
         resources: ['*'],
+      })
+    );
+
+    // CloudWatch Metrics (required by AgentCore runtime)
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'CloudWatchMetrics',
+        effect: iam.Effect.ALLOW,
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+        conditions: {
+          StringEquals: {
+            'cloudwatch:namespace': 'bedrock-agentcore',
+          },
+        },
+      })
+    );
+
+    // AgentCore Identity - Get Workload Access Token
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'GetAgentAccessToken',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock-agentcore:GetWorkloadAccessToken',
+          'bedrock-agentcore:GetWorkloadAccessTokenForJWT',
+          'bedrock-agentcore:GetWorkloadAccessTokenForUserId',
+        ],
+        resources: [
+          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/default`,
+          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/default/workload-identity/bidopsai_workflow_agent_${environment}-*`,
+        ],
       })
     );
 
@@ -264,28 +338,51 @@ export class IAMStack extends cdk.Stack {
   private createAIAssistantAgentRole(environment: string): iam.Role {
     const role = new iam.Role(this, 'AIAssistantAgentRole', {
       roleName: `BidOpsAI-AIAssistantAgent-${environment}`,
-      description: 'IAM role for AI Assistant Supervisor Agent',
-      assumedBy: new iam.CompositePrincipal(
-        new iam.ServicePrincipal('bedrock.amazonaws.com'),
-        new iam.ServicePrincipal('ecs-tasks.amazonaws.com'),
-        new iam.ServicePrincipal('lambda.amazonaws.com'),
-      ),
+      description: 'IAM role for AI Assistant Supervisor Agent - AgentCore Runtime',
+      assumedBy: new iam.ServicePrincipal('bedrock-agentcore.amazonaws.com'),
     });
 
-    // Bedrock model access (same as workflow agent)
+    // ECR Image Access (required by AgentCore to pull container images)
     role.addToPolicy(
       new iam.PolicyStatement({
-        sid: 'BedrockModelAccess',
+        sid: 'ECRImageAccess',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'ecr:BatchGetImage',
+          'ecr:GetDownloadUrlForLayer',
+        ],
+        resources: [`arn:aws:ecr:${this.region}:${this.account}:repository/*`],
+      })
+    );
+
+    // ECR Token Access (required by AgentCore)
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'ECRTokenAccess',
+        effect: iam.Effect.ALLOW,
+        actions: ['ecr:GetAuthorizationToken'],
+        resources: ['*'],
+      })
+    );
+
+    // Bedrock model access (including Converse API and Inference Profiles)
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'BedrockModelInvocation',
         effect: iam.Effect.ALLOW,
         actions: [
           'bedrock:InvokeModel',
           'bedrock:InvokeModelWithResponseStream',
+          'bedrock:Converse',
+          'bedrock:ConverseStream',
           'bedrock:ListFoundationModels',
           'bedrock:GetFoundationModel',
         ],
         resources: [
-          `arn:aws:bedrock:${this.region}::foundation-model/anthropic.*`,
-          `arn:aws:bedrock:${this.region}::foundation-model/amazon.*`,
+          'arn:aws:bedrock:*::foundation-model/*',
+          `arn:aws:bedrock:${this.region}:${this.account}:inference-profile/*`,
+          `arn:aws:bedrock:*:${this.account}:inference-profile/*`,
+          `arn:aws:bedrock:${this.region}:${this.account}:*`,
         ],
       })
     );
@@ -338,24 +435,41 @@ export class IAMStack extends cdk.Stack {
       })
     );
 
-    // CloudWatch Logs
+    // CloudWatch Logs (required by AgentCore runtime)
     role.addToPolicy(
       new iam.PolicyStatement({
-        sid: 'CloudWatchLogs',
+        sid: 'CloudWatchLogsDescribe',
         effect: iam.Effect.ALLOW,
         actions: [
-          'logs:CreateLogGroup',
-          'logs:CreateLogStream',
-          'logs:PutLogEvents',
           'logs:DescribeLogStreams',
+          'logs:CreateLogGroup',
         ],
-        resources: [
-          `arn:aws:logs:${this.region}:${this.account}:log-group:/aws/agentcore/ai-assistant-agent/*`,
-        ],
+        resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock-agentcore/runtimes/*`],
       })
     );
 
-    // X-Ray tracing
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'CloudWatchLogsDescribeAll',
+        effect: iam.Effect.ALLOW,
+        actions: ['logs:DescribeLogGroups'],
+        resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:*`],
+      })
+    );
+
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'CloudWatchLogsWrite',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'logs:CreateLogStream',
+          'logs:PutLogEvents',
+        ],
+        resources: [`arn:aws:logs:${this.region}:${this.account}:log-group:/aws/bedrock-agentcore/runtimes/*:log-stream:*`],
+      })
+    );
+
+    // X-Ray tracing (required by AgentCore runtime)
     role.addToPolicy(
       new iam.PolicyStatement({
         sid: 'XRayTracing',
@@ -363,8 +477,42 @@ export class IAMStack extends cdk.Stack {
         actions: [
           'xray:PutTraceSegments',
           'xray:PutTelemetryRecords',
+          'xray:GetSamplingRules',
+          'xray:GetSamplingTargets',
         ],
         resources: ['*'],
+      })
+    );
+
+    // CloudWatch Metrics (required by AgentCore runtime)
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'CloudWatchMetrics',
+        effect: iam.Effect.ALLOW,
+        actions: ['cloudwatch:PutMetricData'],
+        resources: ['*'],
+        conditions: {
+          StringEquals: {
+            'cloudwatch:namespace': 'bedrock-agentcore',
+          },
+        },
+      })
+    );
+
+    // AgentCore Identity - Get Workload Access Token
+    role.addToPolicy(
+      new iam.PolicyStatement({
+        sid: 'GetAgentAccessToken',
+        effect: iam.Effect.ALLOW,
+        actions: [
+          'bedrock-agentcore:GetWorkloadAccessToken',
+          'bedrock-agentcore:GetWorkloadAccessTokenForJWT',
+          'bedrock-agentcore:GetWorkloadAccessTokenForUserId',
+        ],
+        resources: [
+          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/default`,
+          `arn:aws:bedrock-agentcore:${this.region}:${this.account}:workload-identity-directory/default/workload-identity/bidopsai_ai_assistant_agent_${environment}-*`,
+        ],
       })
     );
 

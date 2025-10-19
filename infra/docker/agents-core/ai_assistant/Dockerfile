@@ -1,91 +1,54 @@
 # =============================================================================
 # BidOpsAI AI Assistant Supervisor Agent - Production Dockerfile
 # =============================================================================
-# Multi-stage build for optimized production image
-# Uses UV for fast dependency installation and Python 3.12+
+# Production deployment for AWS Bedrock AgentCore Runtime
+# Based on AWS AgentCore best practices
 
-# Stage 1: Builder
-FROM python:3.12-slim AS builder
-
-# Set environment variables
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1 \
-    PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    UV_CACHE_DIR=/root/.cache/uv
-
-WORKDIR /build
-
-# Install system dependencies for building
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl \
-    gcc \
-    g++ \
-    make \
-    libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
-
-# Install UV package manager and ensure it's in PATH immediately
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
-    ln -s /root/.local/bin/uv /usr/local/bin/uv && \
-    ln -s /root/.local/bin/uvx /usr/local/bin/uvx
-
-# Copy dependency files
-COPY agents-core/pyproject.toml agents-core/uv.lock* agents-core/README.md ./
-
-# Install production dependencies only
-RUN uv sync --frozen --no-dev || \
-    uv pip install --system -r pyproject.toml --no-dev
-
-# Copy application code
-COPY agents-core/ ./
-
-# Remove test files and dev tools
-RUN find . -type d -name "tests" -exec rm -rf {} + && \
-    find . -type d -name "__pycache__" -exec rm -rf {} + && \
-    find . -type f -name "*.pyc" -delete && \
-    find . -type f -name "*.pyo" -delete
-
-# Stage 2: Runtime
-FROM python:3.12-slim
-
-# Set environment variables
-ENV PYTHONUNBUFFERED=1 \
-    PYTHONDONTWRITEBYTECODE=1 \
-    PYTHONPATH=/app
-
-# Create non-root user
-RUN groupadd -r agentuser && useradd -r -g agentuser agentuser
+FROM --platform=linux/arm64 ghcr.io/astral-sh/uv:python3.12-bookworm-slim
 
 WORKDIR /app
 
-# Install runtime system dependencies
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# Install system dependencies
+RUN echo 'Acquire::Check-Valid-Until "false";' > /etc/apt/apt.conf.d/99no-check-valid-until && \
+    apt-get update && apt-get install -y --no-install-recommends \
     curl \
-    libpq5 \
-    ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && rm /etc/apt/apt.conf.d/99no-check-valid-until
 
-# Copy Python packages from builder
-COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
-COPY --from=builder /usr/local/bin /usr/local/bin
+# Copy uv configuration files AND README (needed for hatchling build)
+COPY pyproject.toml uv.lock README.md ./
 
-# Copy application from builder
-COPY --from=builder /build /app
+# Install dependencies using uv
+RUN uv sync --no-cache
 
-# Create necessary directories
-RUN mkdir -p logs temp && \
-    chown -R agentuser:agentuser /app
+# Copy the entire source directory
+COPY . ./
+
+# Set environment variables
+ENV PORT=8080
+ENV HOST=0.0.0.0
+ENV PYTHONPATH=/app
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV UV_CACHE_DIR=/tmp/uv-cache
+ENV HOME=/root
+
+# Create cache directory
+RUN mkdir -p /tmp/uv-cache && chmod 777 /tmp/uv-cache
+
+# Create non-root user for production
+RUN useradd -m -u 1000 bedrock_agentcore && \
+    chown -R bedrock_agentcore:bedrock_agentcore /app /tmp/uv-cache
 
 # Switch to non-root user
-USER agentuser
+USER bedrock_agentcore
 
-# Expose port
-EXPOSE 8002
+# Expose AgentCore port
+EXPOSE 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
-    CMD curl -f http://localhost:8002/health || exit 1
+# Health check using AgentCore /ping endpoint
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+    CMD curl -f http://localhost:8080/ping || exit 1
 
 # Set labels for metadata
 ARG VERSION=0.1.0
@@ -95,6 +58,5 @@ LABEL maintainer="support@bidopsai.com" \
       version="${VERSION}" \
       build-date="${BUILD_DATE}"
 
-# Run with Bedrock AgentCore SDK runtime
-# The BedrockAgentCoreApp will automatically handle the HTTP server
-CMD ["python", "-m", "supervisors.ai_assistant.agent_executor"]
+# Run with uvicorn using the BedrockAgentCoreApp instance
+CMD ["uv", "run", "--no-cache", "uvicorn", "supervisors.ai_assistant.agent_executor:app", "--host", "0.0.0.0", "--port", "8080"]

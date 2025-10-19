@@ -1,0 +1,63 @@
+# Ignore common development files and directories
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+venv/
+ENV/
+env/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+
+# Documentation
+docs/_build/
+
+# Examples and samples (not needed in production image)
+examples/
+agents-core/examples/
+
+# Other project directories not needed
+../infra/
+../apps/
+../services/
+../docs/
+../scripts/
+../specs/
+../.github/
+../.kiro/
+../.roo/
+../.specify/
+
+# Git
+.git/
+.gitignore

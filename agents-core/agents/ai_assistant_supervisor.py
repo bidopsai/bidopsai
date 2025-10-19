@@ -92,6 +92,19 @@ class AIAssistantSupervisor(BaseAgent):
         super().__init__(mode="ai_assistant", provider=provider, model_id=model_id, **kwargs)
         logger.info("AIAssistantSupervisor initialized (mode=ai_assistant)")
     
+    @property
+    def agent_name(self) -> str:
+        """
+        Override agent name for tool/prompt resolution.
+        
+        Returns "supervisor" instead of "aiassistantsupervisor" to match
+        tool configuration naming convention.
+        
+        Returns:
+            "supervisor" for tool and prompt resolution
+        """
+        return "supervisor"
+    
     def _get_agent_specific_config(self) -> Dict[str, Any]:
         """
         AI assistant supervisor specific configuration.

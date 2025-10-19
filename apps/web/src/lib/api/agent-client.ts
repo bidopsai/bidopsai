@@ -116,9 +116,11 @@ export function getAgentConfig(type: AgentType): AgentConfig {
   const mode = (process.env.NEXT_PUBLIC_AGENT_MODE || 'local') as AgentMode;
   
   if (mode === 'local') {
-    const localUrl = type === 'workflow' 
-      ? process.env.NEXT_PUBLIC_WORKFLOW_AGENT_URL || 'http://localhost:8001'
-      : process.env.NEXT_PUBLIC_AI_ASSISTANT_AGENT_URL || 'http://localhost:8002';
+    // Use server-side env vars (Docker network names) if available,
+    // otherwise fall back to localhost (for local development outside Docker)
+    const localUrl = type === 'workflow'
+      ? process.env.WORKFLOW_AGENT_URL || process.env.NEXT_PUBLIC_WORKFLOW_AGENT_URL || 'http://localhost:8001'
+      : process.env.AI_ASSISTANT_AGENT_URL || process.env.NEXT_PUBLIC_AI_ASSISTANT_AGENT_URL || 'http://localhost:8002';
     
     return {
       mode,

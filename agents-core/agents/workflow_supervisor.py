@@ -84,6 +84,19 @@ class WorkflowSupervisor(BaseAgent):
         super().__init__(mode="workflow", provider=provider, model_id=model_id, **kwargs)
         logger.info("WorkflowSupervisor initialized (mode=workflow)")
     
+    @property
+    def agent_name(self) -> str:
+        """
+        Override agent name for tool/prompt resolution.
+        
+        Returns "supervisor" instead of "workflowsupervisor" to match
+        tool configuration naming convention.
+        
+        Returns:
+            "supervisor" for tool and prompt resolution
+        """
+        return "supervisor"
+    
     def _get_agent_specific_config(self) -> Dict[str, Any]:
         """
         Workflow supervisor specific configuration.

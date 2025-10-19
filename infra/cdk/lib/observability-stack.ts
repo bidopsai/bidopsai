@@ -13,13 +13,17 @@ export interface ObservabilityStackProps extends cdk.StackProps {
 
   /**
    * Workflow agent role for granting observability permissions
+   * NOTE: Made optional to avoid circular dependency with IAM stack
+   * Permissions are now self-contained in IAM stack
    */
-  workflowAgentRole: iam.IRole;
+  workflowAgentRole?: iam.IRole;
 
   /**
    * AI Assistant agent role for granting observability permissions
+   * NOTE: Made optional to avoid circular dependency with IAM stack
+   * Permissions are now self-contained in IAM stack
    */
-  aiAssistantAgentRole: iam.IRole;
+  aiAssistantAgentRole?: iam.IRole;
 
   /**
    * LangFuse API key secret (optional, can be set later)
@@ -83,15 +87,11 @@ export class ObservabilityStack extends cdk.Stack {
         : cdk.RemovalPolicy.DESTROY,
     });
 
-    // Grant CloudWatch Logs permissions to agent roles
-    this.workflowAgentLogGroup.grantWrite(props.workflowAgentRole);
-    this.aiAssistantAgentLogGroup.grantWrite(props.aiAssistantAgentRole);
-    this.systemLogGroup.grantWrite(props.workflowAgentRole);
-    this.systemLogGroup.grantWrite(props.aiAssistantAgentRole);
+    // Note: CloudWatch Logs permissions are already granted in IAM stack
+    // to avoid circular dependencies. IAM roles have appropriate log group access.
 
-    // Grant X-Ray permissions for distributed tracing
-    this.grantXRayPermissions(props.workflowAgentRole);
-    this.grantXRayPermissions(props.aiAssistantAgentRole);
+    // Note: X-Ray permissions are already granted in IAM stack
+    // to avoid circular dependencies.
 
     // Create CloudWatch Dashboard
     this.dashboard = this.createDashboard(props.environment);
@@ -130,33 +130,6 @@ export class ObservabilityStack extends cdk.Stack {
     cdk.Tags.of(this).add('Application', 'BidOpsAI');
     cdk.Tags.of(this).add('Component', 'Observability');
     cdk.Tags.of(this).add('ManagedBy', 'CDK');
-  }
-
-  /**
-   * Grant X-Ray tracing permissions to a role
-   */
-  private grantXRayPermissions(role: iam.IRole): void {
-    // X-Ray permissions for distributed tracing
-    const xrayPolicy = new iam.Policy(this, `XRayPolicy-${role.node.id}`, {
-      statements: [
-        new iam.PolicyStatement({
-          sid: 'XRayTracing',
-          actions: [
-            'xray:PutTraceSegments',
-            'xray:PutTelemetryRecords',
-            'xray:GetSamplingRules',
-            'xray:GetSamplingTargets',
-            'xray:GetSamplingStatisticSummaries',
-          ],
-          resources: ['*'],
-        }),
-      ],
-    });
-
-    // Attach policy to role if it's a Role (not IRole)
-    if (role instanceof iam.Role) {
-      xrayPolicy.attachToRole(role);
-    }
   }
 
   /**
