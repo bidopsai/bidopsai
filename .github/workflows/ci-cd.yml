@@ -12,12 +12,6 @@ on:
         required: false
         default: false
         type: boolean
-      scan_tag:
-        description: "Tag to scan (e.g., develop-abc123d or latest)"
-        required: false
-        default: "latest"
-        type: string
-
 env:
   AWS_REGION: us-east-1
   NODE_VERSION: "24"
@@ -198,7 +192,6 @@ jobs:
     name: Build & Push Frontend
     runs-on: ubuntu-latest
     needs: changes
-    if: always() && github.event.inputs.scan_only != 'true' && (github.event_name == 'push' || github.event_name == 'pull_request' || github.event.inputs.force_rebuild == 'true')
     outputs:
       image-tag: ${{ steps.meta.outputs.version }}
     steps:
@@ -251,13 +244,11 @@ jobs:
           echo "✅ Frontend image pushed successfully"
           echo "📦 Repository: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO_APP }}"
           echo "🏷️  Tags: ${{ steps.meta.outputs.tags }}"
-          echo "🔖 Version for scanning: ${{ steps.meta.outputs.version }}"
 
   build-agent:
     name: Build & Push AgentCore
     runs-on: ubuntu-latest
     needs: changes
-    if: always() && github.event.inputs.scan_only != 'true' && ((needs.changes.outputs.agent == 'true' && (github.event_name == 'push' || github.event_name == 'pull_request' || github.event.inputs.force_rebuild == 'true')) || github.event.inputs.force_rebuild == 'true')
     outputs:
       image-tag: ${{ steps.meta.outputs.version }}
     steps:
@@ -304,8 +295,6 @@ jobs:
           echo "✅ AgentCore image pushed successfully"
           echo "📦 Repository: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO_AGENT }}"
           echo "🏷️  Tags: ${{ steps.meta.outputs.tags }}"
-          echo "🔖 Version for scanning: ${{ steps.meta.outputs.version }}"
-
   # ============================================================================
   # SECURITY SCANNING
   # ============================================================================
