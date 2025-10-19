@@ -1,21 +1,49 @@
-name: CI/CD Pipeline
+name: CI/CD Pipeline (DISABLED - Legacy)
+
+# ============================================================================
+# ⚠️  THIS WORKFLOW IS CURRENTLY DISABLED
+# ============================================================================
+# Reason: Consolidated into ci-cd.yml with OIDC authentication
+# Date Disabled: October 18, 2025
+# Issues:
+#   - Uses deprecated AWS access keys (security risk)
+#   - Branch tag strategy conflicts with ECR immutable tags
+#   - Duplicate of ci-cd.yml functionality
+#
+# Kept for reference:
+#   - core-api build configuration
+#   - Test job setup examples
+#   - Original tag strategy documentation
+#
+# To re-enable, uncomment the 'on:' section below
+# ============================================================================
 
 on:
-  push:
-    branches:
-      - main
-      - develop
-  pull_request:
-    branches:
-      - main
-      - develop
+  # Disabled - workflow won't run on any events
   workflow_dispatch:
     inputs:
-      force_rebuild:
-        description: 'Force rebuild all images'
+      _disabled:
+        description: "This workflow is disabled. Use ci-cd.yml instead."
         required: false
-        default: false
-        type: boolean
+        default: "See ci-cd.yml"
+        type: string
+
+# Original triggers (commented out):
+#   push:
+#     branches:
+#       - main
+#       - develop
+#   pull_request:
+#     branches:
+#       - main
+#       - develop
+#   workflow_dispatch:
+#     inputs:
+#       force_rebuild:
+#         description: 'Force rebuild all images'
+#         required: false
+#         default: false
+#         type: boolean
 
 env:
   AWS_REGION: us-east-1
@@ -66,9 +94,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: 'apps/web/package-lock.json'
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: "apps/web/package-lock.json"
 
       - name: Install dependencies
         working-directory: apps/web
@@ -98,9 +126,9 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '24'
-          cache: 'npm'
-          cache-dependency-path: 'services/core-api/package-lock.json'
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: "services/core-api/package-lock.json"
 
       - name: Install dependencies
         working-directory: services/core-api
@@ -234,12 +262,12 @@ jobs:
       - name: Run Trivy vulnerability scanner
         uses: aquasecurity/trivy-action@master
         with:
-          image-ref: '${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REGISTRY_APP }}-${{ matrix.service }}:${{ github.sha }}'
-          format: 'sarif'
-          output: 'trivy-results-${{ matrix.service }}.sarif'
+          image-ref: "${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REGISTRY_APP }}-${{ matrix.service }}:${{ github.sha }}"
+          format: "sarif"
+          output: "trivy-results-${{ matrix.service }}.sarif"
 
       - name: Upload Trivy scan results to GitHub Security tab
         uses: github/codeql-action/upload-sarif@v3
         if: always()
         with:
-          sarif_file: 'trivy-results-${{ matrix.service }}.sarif'
+          sarif_file: "trivy-results-${{ matrix.service }}.sarif"

@@ -85,11 +85,16 @@ jobs:
   # ============================================================================
   # LINT JOBS
   # ============================================================================
+  # NOTE: Temporarily disabled while fixing lint errors
+  # TODO: Re-enable once codebase passes linting
+  # - Frontend: ESLint + TypeScript errors
+  # - AgentCore: Ruff + Black formatting issues
+  # ============================================================================
   lint-app:
     name: Lint Frontend
     runs-on: ubuntu-latest
     needs: changes
-    if: false # Temporarily disabled
+    if: false # Temporarily disabled - failing due to lint errors
     defaults:
       run:
         working-directory: apps/web
@@ -118,7 +123,7 @@ jobs:
     name: Lint AgentCore
     runs-on: ubuntu-latest
     needs: changes
-    if: false # Temporarily disabled
+    if: false # Temporarily disabled - failing due to lint errors
     defaults:
       run:
         working-directory: agentcore
@@ -150,11 +155,14 @@ jobs:
   # ============================================================================
   # TEST JOBS
   # ============================================================================
+  # NOTE: Temporarily disabled while stabilizing the build
+  # TODO: Re-enable once dependencies are fixed
+  # ============================================================================
   test-app:
     name: Test Frontend
     runs-on: ubuntu-latest
     needs: changes
-    if: false # Temporarily disabled
+    if: false # Temporarily disabled - build/dependency issues
     defaults:
       run:
         working-directory: apps/web
@@ -209,9 +217,10 @@ jobs:
         with:
           images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO_APP }}
           tags: |
-            type=ref,event=branch
-            type=sha,prefix={{branch}}-
+            type=sha,prefix={{branch}}-,format=short
             type=raw,value=latest,enable={{is_default_branch}}
+          flavor: |
+            latest=false
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
@@ -264,9 +273,10 @@ jobs:
         with:
           images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REPO_AGENT }}
           tags: |
-            type=ref,event=branch
-            type=sha,prefix={{branch}}-
+            type=sha,prefix={{branch}}-,format=short
             type=raw,value=latest,enable={{is_default_branch}}
+          flavor: |
+            latest=false
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
@@ -286,12 +296,76 @@ jobs:
           echo "🏷️  Tags: ${{ steps.meta.outputs.tags }}"
 
   # ============================================================================
+  # SECURITY SCANNING
+  # ============================================================================
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: [changes, build-app, build-agent]
+    if: always() && (needs.build-app.result == 'success' || needs.build-agent.result == 'success')
+    permissions:
+      id-token: write
+      contents: read
+      security-events: write # Required for uploading SARIF results
+    strategy:
+      matrix:
+        include:
+          - service: app
+            repo: ${{ needs.build-app.result == 'success' && 'bidopsai/app' || '' }}
+          - service: agent
+            repo: ${{ needs.build-agent.result == 'success' && 'bidopsai/agent' || '' }}
+    steps:
+      - name: Skip if service wasn't built
+        if: matrix.repo == ''
+        run: |
+          echo "Service ${{ matrix.service }} was not built, skipping scan"
+          exit 0
+
+      - name: Checkout code
+        if: matrix.repo != ''
+        uses: actions/checkout@v4
+
+      - name: Configure AWS credentials
+        if: matrix.repo != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        if: matrix.repo != ''
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Get image tag from build
+        if: matrix.repo != ''
+        id: get-tag
+        run: |
+          # Use the SHA-based tag we just built
+          TAG="${{ github.ref_name }}-${{ github.sha }}"
+          echo "tag=${TAG:0:14}" >> $GITHUB_OUTPUT
+
+      - name: Run Trivy vulnerability scanner
+        if: matrix.repo != ''
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "${{ steps.login-ecr.outputs.registry }}/${{ matrix.repo }}:${{ steps.get-tag.outputs.tag }}"
+          format: "sarif"
+          output: "trivy-results-${{ matrix.service }}.sarif"
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        if: always() && matrix.repo != ''
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: "trivy-results-${{ matrix.service }}.sarif"
+
+  # ============================================================================
   # SUMMARY
   # ============================================================================
   summary:
     name: Pipeline Summary
     runs-on: ubuntu-latest
-    needs: [changes, build-app, build-agent]
+    needs: [changes, build-app, build-agent, security-scan]
     if: always()
     steps:
       - name: Check build results
@@ -303,6 +377,9 @@ jobs:
           echo "📦 Build Results:"
           echo "  Frontend (App): ${{ needs.build-app.result }}"
           echo "  AgentCore: ${{ needs.build-agent.result }}"
+          echo ""
+          echo "🔒 Security Scan Results:"
+          echo "  Security Scan: ${{ needs.security-scan.result }}"
           echo ""
           if [[ "${{ needs.build-app.result }}" == "failure" ]] || \
              [[ "${{ needs.build-agent.result }}" == "failure" ]]; then
