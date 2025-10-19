@@ -9,4 +9,6 @@ COPY agent.py .
 
 EXPOSE 8000
 
+USER 1000
+
 CMD ["python", "agent.py"]
