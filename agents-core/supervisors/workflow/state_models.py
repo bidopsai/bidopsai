@@ -125,6 +125,12 @@ class WorkflowGraphState(TimestampedModel):
         description="Shared context between agents"
     )
     
+    # Supervisor routing (for conditional edges)
+    supervisor_next_node: Optional[str] = Field(
+        None,
+        description="Next node decided by supervisor (used by conditional edges)"
+    )
+    
     # User interaction
     awaiting_user_feedback: bool = Field(default=False)
     user_feedback: Optional[str] = Field(

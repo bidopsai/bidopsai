@@ -29,6 +29,7 @@ Architecture:
 """
 
 import asyncio
+import json
 import signal
 import sys
 import time
@@ -169,23 +170,25 @@ async def shutdown_event():
 # ========================================
 
 @app.entrypoint
-@track_agent_performance(agent_name="workflow_executor")
 async def invoke_workflow(
-    request: InvocationRequest,
+    payload: dict,
     context: RequestContext
 ):
     """
     Main agent invocation entrypoint (AgentCore native with streaming).
     
+    IMPORTANT: AWS AgentCore passes raw dict payload, NOT Pydantic models.
+    This function validates and parses the dict into InvocationRequest model.
+    
     Receives workflow execution requests and orchestrates the complete
     bid processing workflow using Strands StateGraph pattern.
     
     Supports two execution modes:
-    1. Initial Start (request.start=True): Creates new workflow, initializes state
-    2. Resumption (request.start=False): Loads from memory, applies user input, resumes
+    1. Initial Start (start=True): Creates new workflow, initializes state
+    2. Resumption (start=False): Loads from memory, applies user input, resumes
     
     Args:
-        request: InvocationRequest with:
+        payload: Raw dict payload from AgentCore with:
             - project_id: UUID of the project
             - user_id: UUID of the requesting user
             - session_id: Session ID for memory and streaming
@@ -207,6 +210,40 @@ async def invoke_workflow(
     Raises:
         AgentError: On validation or execution errors
     """
+    # Parse and validate payload (AgentCore passes raw dict, not Pydantic model)
+    try:
+        # Handle both string and dict payloads
+        import json
+        if isinstance(payload, str):
+            payload = json.loads(payload)
+        
+        # Validate and parse into Pydantic model
+        request = InvocationRequest(**payload)
+        
+    except Exception as e:
+        error_msg = f"Invalid request payload: {str(e)}"
+        log_agent_action(
+            agent_name="workflow_executor",
+            action="payload_validation_failed",
+            details={"error": error_msg, "payload": str(payload)},
+            level="error"
+        )
+        
+        # Yield error event
+        yield {
+            "type": "error",
+            "data": {
+                "error_message": error_msg,
+                "error_code": ErrorCode.VALIDATION_ERROR
+            },
+            "timestamp": datetime.utcnow().isoformat()
+        }
+        raise AgentError(
+            error_code=ErrorCode.VALIDATION_ERROR,
+            message=error_msg,
+            severity=ErrorSeverity.LOW
+        )
+    
     log_agent_action(
         agent_name="workflow_executor",
         action="invocation_received",
@@ -216,8 +253,7 @@ async def invoke_workflow(
             "session_id": request.session_id,
             "start": request.start,
             "has_user_input": request.user_input is not None,
-            "context_user_id": context.user_id,
-            "context_session_id": context.session_id
+            "context_session_id": context.session_id  # RequestContext only has session_id
         }
     )
     
@@ -253,7 +289,7 @@ async def invoke_workflow(
             agent_name="workflow_executor",
             action="invocation_failed",
             details={
-                "error_code": e.code,
+                "error_code": e.error_code,
                 "error_message": str(e),
                 "severity": e.severity
             },
@@ -264,7 +300,7 @@ async def invoke_workflow(
         yield json.dumps({
             "type": "error",
             "data": {
-                "error_code": e.code,
+                "error_code": e.error_code,
                 "error_message": str(e),
                 "severity": e.severity
             },
@@ -290,8 +326,8 @@ async def invoke_workflow(
         }
         
         raise AgentError(
+            error_code=ErrorCode.UNKNOWN_ERROR,
             message=f"Internal server error: {str(e)}",
-            code=ErrorCode.INTERNAL_ERROR,
             severity=ErrorSeverity.CRITICAL
         )
 
@@ -318,16 +354,16 @@ def _validate_invocation_request(request: InvocationRequest) -> None:
     # Validate session_id format
     if not request.session_id or len(request.session_id) < 10:
         raise AgentError(
+            error_code=ErrorCode.VALIDATION_ERROR,
             message="Invalid session_id format (minimum 10 characters)",
-            code=ErrorCode.VALIDATION_ERROR,
             severity=ErrorSeverity.LOW
         )
     
     # Validate start flag logic
     if request.start and request.user_input:
         raise AgentError(
+            error_code=ErrorCode.VALIDATION_ERROR,
             message="Cannot provide user_input when start=true (initial workflow start)",
-            code=ErrorCode.VALIDATION_ERROR,
             severity=ErrorSeverity.LOW
         )
 
@@ -421,78 +457,54 @@ async def _execute_workflow_with_streaming(
         from supervisors.workflow.agent_builder import build_workflow_graph
         graph = build_workflow_graph()
         
-        # Configure graph with session/thread ID
-        config = {
-            "configurable": {
-                "thread_id": request.session_id,
-                "user_id": str(request.user_id)
-            }
+        # Strands Graph uses invocation_state for passing shared state
+        # The task parameter is a simple string describing the workflow
+        task = f"Execute workflow for project_id: {request.project_id}"
+        invocation_state = {
+            "workflow_state": state,
+            "session_id": request.session_id,
+            "user_id": str(request.user_id)
         }
         
-        # Execute with streaming using native AgentCore
-        final_state = None
+        # Execute graph using invoke_async (Strands Graph standard method)
+        # Note: Strands Graph expects (task: str, invocation_state: dict)
+        graph_result = await graph.invoke_async(task, invocation_state)
         
-        # Stream graph execution using agent.stream_async()
-        async for event in graph.astream(state, config):
-            # Extract state update from event
-            if isinstance(event, dict):
-                for node_name, node_output in event.items():
-                    # Update final state
-                    if isinstance(node_output, WorkflowGraphState):
-                        final_state = node_output
-                    
-                    # Yield streaming event
-                    event_data = {
-                        "type": "node_completed",
-                        "data": {
-                            "node": node_name,
-                            "current_agent": final_state.current_agent if final_state else None,
-                            "progress": final_state.calculate_progress() if final_state else 0,
-                            "workflow_id": str(final_state.workflow_execution_id) if final_state else None
-                        },
-                        "timestamp": datetime.utcnow().isoformat()
-                    }
-                    yield event_data
-                    
-                    # Persist event to conversation
-                    await add_sse_event(
-                        project_id=request.project_id,
-                        session_id=request.session_id,
-                        event_type="node_completed",
-                        data={"node": node_name}
-                    )
-                    
-                    log_agent_action(
-                        agent_name="workflow_executor",
-                        action="node_completed",
-                        details={
-                            "node": node_name,
-                            "workflow_id": str(final_state.workflow_execution_id) if final_state else None
-                        }
-                    )
-            
-            # Check if graph interrupted for user feedback
-            if final_state and final_state.awaiting_user_feedback:
-                log_agent_action(
-                    agent_name="workflow_executor",
-                    action="graph_interrupted",
-                    details={
-                        "workflow_id": str(final_state.workflow_execution_id),
-                        "reason": "awaiting_user_feedback"
-                    }
-                )
-                
-                # Yield awaiting feedback event
-                yield {
-                    "type": "awaiting_feedback",
-                    "data": {
-                        "workflow_id": str(final_state.workflow_execution_id),
-                        "message": "Workflow paused - awaiting user feedback"
-                    },
-                    "timestamp": datetime.utcnow().isoformat()
+        # Extract final state from graph results
+        # The graph_result is a MultiAgentResult containing NodeResults for each node
+        final_state = invocation_state.get("workflow_state")
+        
+        log_agent_action(
+            agent_name="workflow_executor",
+            action="graph_execution_complete",
+            details={
+                "workflow_id": str(final_state.workflow_execution_id) if final_state else None,
+                "current_agent": final_state.current_agent if final_state else None,
+                "completed_tasks": len(final_state.completed_tasks) if final_state else 0
+            }
+        )
+        
+        # Check if graph interrupted for user feedback
+        if final_state and final_state.awaiting_user_feedback:
+            log_agent_action(
+                agent_name="workflow_executor",
+                action="graph_interrupted",
+                details={
+                    "workflow_id": str(final_state.workflow_execution_id),
+                    "reason": "awaiting_user_feedback"
                 }
-                # Graph interrupted - break
-                break
+            )
+            
+            # Yield awaiting feedback event
+            yield {
+                "type": "awaiting_feedback",
+                "data": {
+                    "workflow_id": str(final_state.workflow_execution_id),
+                    "message": "Workflow paused - awaiting user feedback",
+                    "progress": final_state.calculate_progress()
+                },
+                "timestamp": datetime.utcnow().isoformat()
+            }
         
         # Record workflow duration metric
         workflow_duration = time.time() - workflow_start_time
@@ -534,7 +546,7 @@ async def _execute_workflow_with_streaming(
         obs.record_agent_error(
             agent_name="workflow_executor",
             error_type=type(e).__name__,
-            error_code=getattr(e, 'code', ErrorCode.EXECUTION_ERROR)
+            error_code=getattr(e, 'error_code', ErrorCode.WORKFLOW_EXECUTION_FAILED)
         )
         
         # Record failed workflow duration
@@ -561,14 +573,14 @@ async def _execute_workflow_with_streaming(
             "type": "error",
             "data": {
                 "error_message": f"Workflow execution failed: {str(e)}",
-                "error_code": ErrorCode.EXECUTION_ERROR
+                "error_code": ErrorCode.WORKFLOW_EXECUTION_FAILED
             },
             "timestamp": datetime.utcnow().isoformat()
         }
         
         raise AgentError(
+            error_code=ErrorCode.WORKFLOW_EXECUTION_FAILED,
             message=f"Workflow execution failed: {str(e)}",
-            code=ErrorCode.EXECUTION_ERROR,
             severity=ErrorSeverity.HIGH
         )
 
@@ -652,23 +664,30 @@ async def _load_and_update_state(
     )
     
     try:
-        # Get compiled graph directly from builder
-        from supervisors.workflow.agent_builder import build_workflow_graph
-        graph = build_workflow_graph()
+        # Load state from AgentCore Memory system
+        # Note: Strands Graph doesn't have get_state() - we use memory_manager
+        from core.memory import get_memory_manager
         
-        # Load checkpoint state from graph (AgentCore Memory handles persistence)
-        config = {"configurable": {"thread_id": request.session_id}}
-        checkpoint = graph.get_state(config)
+        memory_manager = get_memory_manager()
         
-        if not checkpoint or not checkpoint.values:
+        # Retrieve workflow state from memory
+        memory_key = f"workflow_state_{request.session_id}"
+        state_data = await memory_manager.get(
+            key=memory_key,
+            user_id=str(request.user_id)
+        )
+        
+        if not state_data:
             raise AgentError(
+                error_code=ErrorCode.WORKFLOW_STATE_INVALID,
                 message=f"No workflow found for session_id: {request.session_id}",
-                code=ErrorCode.WORKFLOW_NOT_FOUND,
                 severity=ErrorSeverity.MEDIUM
             )
         
-        # Extract state from checkpoint
-        state: WorkflowGraphState = checkpoint.values
+        # Deserialize state from memory
+        import json
+        state_dict = json.loads(state_data) if isinstance(state_data, str) else state_data
+        state = WorkflowGraphState(**state_dict)
         
         log_agent_action(
             agent_name="workflow_executor",
@@ -717,8 +736,8 @@ async def _load_and_update_state(
             level="error"
         )
         raise AgentError(
+            error_code=ErrorCode.WORKFLOW_STATE_INVALID,
             message=f"Failed to load workflow state: {str(e)}",
-            code=ErrorCode.MEMORY_ERROR,
             severity=ErrorSeverity.HIGH
         )
 

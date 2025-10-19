@@ -28,17 +28,20 @@ RUN uv pip install --system --no-cache -e . || \
 # Install development tools
 RUN uv pip install --system --no-cache debugpy ipython ipdb
 
+# Install watchfiles with polling support
+RUN uv pip install --system --no-cache watchfiles
+
 # Copy source code
 COPY agents-core/ ./
 
-# Expose port 8001 (different from Workflow Supervisor's 8000)
-EXPOSE 8001
+# Expose port 8002 (AI Assistant Agent)
+EXPOSE 8002
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV LOG_LEVEL=DEBUG
 
-# Run directly with uvicorn (installed system-wide)
-CMD ["uvicorn", "supervisors.ai_assistant.agent_executor:app", \
-     "--host", "0.0.0.0", "--port", "8002", "--reload", "--log-level", "debug"]
+# Run with uvicorn and hot-reload using watchfiles with polling
+# This enables polling mode which works reliably with Docker volumes
+CMD ["sh", "-c", "WATCHFILES_FORCE_POLLING=true uvicorn supervisors.ai_assistant.agent_executor:app --host 0.0.0.0 --port 8002 --reload --reload-dir /app/supervisors --reload-dir /app/tools --reload-dir /app/prompts --reload-dir /app/models --reload-dir /app/core --log-level debug"]

@@ -81,6 +81,9 @@ services:
       # Use localhost for browser access to API
       - NEXT_PUBLIC_API_URL=http://localhost:4000
       - NEXT_PUBLIC_AGENT_CORE_URL=http://localhost:5000
+      # Server-side agent URLs (inside Docker network)
+      - WORKFLOW_AGENT_URL=http://workflow-agent:8001
+      - AI_ASSISTANT_AGENT_URL=http://ai-assistant-agent:8002
       - WATCHPACK_POLLING=true
       - CHOKIDAR_USEPOLLING=true
     networks:

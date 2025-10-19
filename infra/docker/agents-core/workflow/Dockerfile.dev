@@ -59,15 +59,10 @@ EXPOSE 5678
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -f http://localhost:8001/ping || exit 1
 
-# Run with uvicorn and hot-reload
-CMD ["uvicorn", "supervisors.workflow.agent_executor:app", \
-     "--host", "0.0.0.0", \
-     "--port", "8001", \
-     "--reload", \
-     "--reload-dir", "agents", \
-     "--reload-dir", "supervisors", \
-     "--reload-dir", "tools", \
-     "--reload-dir", "prompts", \
-     "--reload-dir", "models", \
-     "--reload-dir", "core", \
-     "--log-level", "debug"]
+# Run with uvicorn and hot-reload using watchfiles with polling
+# Install watchfiles with polling support
+RUN uv pip install --system --no-cache watchfiles
+
+# Run with uvicorn and hot-reload using WATCHFILES_FORCE_POLLING
+# This enables polling mode which works reliably with Docker volumes
+CMD ["sh", "-c", "WATCHFILES_FORCE_POLLING=true uvicorn supervisors.workflow.agent_executor:app --host 0.0.0.0 --port 8001 --reload --reload-dir /app/supervisors --reload-dir /app/tools --reload-dir /app/prompts --reload-dir /app/models --reload-dir /app/core --log-level debug"]

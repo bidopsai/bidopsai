@@ -557,7 +557,7 @@ Remember:
             )
             next_node = "complete"
         
-        # Step 8: Store decision in state
+        # Step 8: Store decision in state (for next supervisor iteration)
         state.task_outputs["supervisor"] = {
             "next_node": next_node,
             "decision_type": decision.decision_type,
@@ -567,6 +567,10 @@ Remember:
             "agent_driven": True,  # Flag indicating agent-driven decision
             "full_decision": decision.dict()  # Store full decision for debugging
         }
+        
+        # CRITICAL: Also store next_node in a simple format for conditional edges
+        # Strands conditional functions will access this via AgentResult.state
+        state.supervisor_next_node = next_node
         
         # Step 9: Emit SSE events
         sse_manager = _get_sse_manager()
