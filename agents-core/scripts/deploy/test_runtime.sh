@@ -101,22 +101,31 @@ echo "  Runtime Name: ${RUNTIME_NAME}"
 echo ""
 
 # Create test payload based on agent type
+# Use snake_case field names to match Pydantic model
 if [ "${AGENT_TYPE}" == "workflow" ]; then
     TEST_PAYLOAD=$(cat <<EOF
 {
-  "sessionId": "test-session-$(date +%s)",
-  "message": "Create a new tender for software development project",
-  "userId": "test-user",
-  "projectId": "test-project-123"
+  "project_id": "00000000-0000-0000-0000-000000000001",
+  "user_id": "00000000-0000-0000-0000-000000000002",
+  "session_id": "test-session-$(date +%s)",
+  "start": true,
+  "user_input": null,
+  "workflow_config": {},
+  "metadata": {
+    "test_message": "Create a new tender for software development project"
+  }
 }
 EOF
 )
 else
     TEST_PAYLOAD=$(cat <<EOF
 {
-  "sessionId": "test-session-$(date +%s)",
+  "user_id": "00000000-0000-0000-0000-000000000002",
+  "session_id": "test-session-$(date +%s)",
   "message": "What can you help me with?",
-  "userId": "test-user"
+  "metadata": {
+    "test_request": true
+  }
 }
 EOF
 )
