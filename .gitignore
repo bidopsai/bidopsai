@@ -143,6 +143,10 @@ agents-core/**/celerybeat.pid
 # Local development
 agents-core/.env.development
 
+# Python virtual environments (root level)
+.venv/
+venv/
+
 # ============================================
 # IDE AND EDITORS
 # ============================================
@@ -210,6 +214,7 @@ docker-compose.override.yml
 # TEMPORARY AND BACKUP FILES
 # ============================================
 
+tmp/
 *.tmp
 *.temp
 *.bak

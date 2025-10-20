@@ -1,0 +1,273 @@
+name: CI/CD Pipeline (DISABLED - Legacy)
+
+# ============================================================================
+# ⚠️  THIS WORKFLOW IS CURRENTLY DISABLED
+# ============================================================================
+# Reason: Consolidated into ci-cd.yml with OIDC authentication
+# Date Disabled: October 18, 2025
+# Issues:
+#   - Uses deprecated AWS access keys (security risk)
+#   - Branch tag strategy conflicts with ECR immutable tags
+#   - Duplicate of ci-cd.yml functionality
+#
+# Kept for reference:
+#   - core-api build configuration
+#   - Test job setup examples
+#   - Original tag strategy documentation
+#
+# To re-enable, uncomment the 'on:' section below
+# ============================================================================
+
+on:
+  # Disabled - workflow won't run on any events
+  workflow_dispatch:
+    inputs:
+      _disabled:
+        description: "This workflow is disabled. Use ci-cd.yml instead."
+        required: false
+        default: "See ci-cd.yml"
+        type: string
+
+# Original triggers (commented out):
+#   push:
+#     branches:
+#       - main
+#       - develop
+#   pull_request:
+#     branches:
+#       - main
+#       - develop
+#   workflow_dispatch:
+#     inputs:
+#       force_rebuild:
+#         description: 'Force rebuild all images'
+#         required: false
+#         default: false
+#         type: boolean
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REGISTRY_APP: bidopsai/app
+  ECR_REGISTRY_API: bidopsai/api
+  ECR_REGISTRY_AGENT: bidopsai/agent
+
+jobs:
+  changes:
+    name: Detect Changes
+    runs-on: ubuntu-latest
+    outputs:
+      web: ${{ steps.changes.outputs.web }}
+      core-api: ${{ steps.changes.outputs.core-api }}
+      agentcore: ${{ steps.changes.outputs.agentcore }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check for changes
+        uses: dorny/paths-filter@v3
+        id: changes
+        with:
+          filters: |
+            web:
+              - 'apps/web/**'
+              - 'docker/apps/web/**'
+              - '.github/workflows/ci.yaml'
+            core-api:
+              - 'services/core-api/**'
+              - 'docker/services/core-api/**'
+              - '.github/workflows/ci.yaml'
+            agentcore:
+              - 'agentcore/**'
+              - '.github/workflows/ci.yaml'
+
+  test-web:
+    name: Test Frontend
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.web == 'true' || github.event.inputs.force_rebuild == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: "apps/web/package-lock.json"
+
+      - name: Install dependencies
+        working-directory: apps/web
+        run: npm ci
+
+      - name: Run linting
+        working-directory: apps/web
+        run: npm run lint
+
+      - name: Type check
+        working-directory: apps/web
+        run: npx tsc --noEmit
+
+      - name: Build application
+        working-directory: apps/web
+        run: npm run build
+
+  test-core-api:
+    name: Test Core API
+    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.core-api == 'true' || github.event.inputs.force_rebuild == 'true'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "npm"
+          cache-dependency-path: "services/core-api/package-lock.json"
+
+      - name: Install dependencies
+        working-directory: services/core-api
+        run: npm ci
+
+      - name: Run linting
+        working-directory: services/core-api
+        run: npm run lint
+
+      - name: Run tests
+        working-directory: services/core-api
+        run: npm test
+
+      - name: Build application
+        working-directory: services/core-api
+        run: npm run build
+
+  build-and-push:
+    name: Build and Push to ECR
+    runs-on: ubuntu-latest
+    needs: [changes, test-web, test-core-api]
+    if: always() && (needs.test-web.result == 'success' || needs.test-web.result == 'skipped') && (needs.test-core-api.result == 'success' || needs.test-core-api.result == 'skipped')
+    strategy:
+      matrix:
+        include:
+          - service: web
+            dockerfile: docker/apps/web/Dockerfile
+            context: .
+            needs_change: ${{ needs.changes.outputs.web }}
+          - service: core-api
+            dockerfile: docker/services/core-api/Dockerfile
+            context: .
+            needs_change: ${{ needs.changes.outputs.core-api }}
+          - service: agentcore
+            dockerfile: agentcore/Dockerfile
+            context: agentcore
+            needs_change: ${{ needs.changes.outputs.agentcore }}
+    steps:
+      - name: Skip if no changes
+        if: matrix.needs_change != 'true' && github.event.inputs.force_rebuild != 'true'
+        run: |
+          echo "No changes detected for ${{ matrix.service }}, skipping build"
+          exit 0
+
+      - name: Checkout
+        if: matrix.needs_change == 'true' || github.event.inputs.force_rebuild == 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        if: matrix.needs_change == 'true' || github.event.inputs.force_rebuild == 'true'
+        uses: docker/setup-buildx-action@v3
+        with:
+          platforms: linux/amd64,linux/arm64
+
+      - name: Configure AWS credentials
+        if: matrix.needs_change == 'true' || github.event.inputs.force_rebuild == 'true'
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        if: matrix.needs_change == 'true' || github.event.inputs.force_rebuild == 'true'
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Generate image metadata
+        if: matrix.needs_change == 'true' || github.event.inputs.force_rebuild == 'true'
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REGISTRY_APP}}-${{ matrix.service }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+
+      - name: Check if Dockerfile exists
+        if: matrix.needs_change == 'true' || github.event.inputs.force_rebuild == 'true'
+        id: dockerfile-check
+        run: |
+          if [ -f "${{ matrix.dockerfile }}" ]; then
+            echo "dockerfile_exists=true" >> $GITHUB_OUTPUT
+          else
+            echo "dockerfile_exists=false" >> $GITHUB_OUTPUT
+            echo "Warning: Dockerfile not found at ${{ matrix.dockerfile }}"
+          fi
+
+      - name: Build and push Docker image
+        if: (matrix.needs_change == 'true' || github.event.inputs.force_rebuild == 'true') && steps.dockerfile-check.outputs.dockerfile_exists == 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ matrix.context }}
+          file: ${{ matrix.dockerfile }}
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            BUILDKIT_INLINE_CACHE=1
+
+      - name: Image digest
+        if: (matrix.needs_change == 'true' || github.event.inputs.force_rebuild == 'true') && steps.dockerfile-check.outputs.dockerfile_exists == 'true'
+        run: |
+          echo "Image pushed with digest: ${{ steps.meta.outputs.digest }}"
+
+  security-scan:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    needs: [changes, build-and-push]
+    if: always() && needs.build-and-push.result == 'success'
+    strategy:
+      matrix:
+        service: [web, core-api, agentcore]
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: "${{ steps.login-ecr.outputs.registry }}/${{ env.ECR_REGISTRY_APP }}-${{ matrix.service }}:${{ github.sha }}"
+          format: "sarif"
+          output: "trivy-results-${{ matrix.service }}.sarif"
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: "trivy-results-${{ matrix.service }}.sarif"
