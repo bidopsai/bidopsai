@@ -2,7 +2,7 @@ name: CI/CD Pipeline
 
 on:
   push:
-    branches: [main, develop]
+    branches: [main, develop, fix/ecs-deployment-health-check]
   pull_request:
     branches: [main, develop]
   workflow_dispatch:
@@ -234,11 +234,9 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           build-args: |
-            NEXT_PUBLIC_API_URL=${{ env.NEXT_PUBLIC_API_URL }}
-            NEXT_PUBLIC_AGENT_CORE_URL=${{ env.NEXT_PUBLIC_AGENT_CORE_URL }}
             NEXT_PUBLIC_AWS_REGION=${{ env.AWS_REGION }}
             NEXT_PUBLIC_COGNITO_USER_POOL_ID=${{ secrets.NEXT_PUBLIC_COGNITO_USER_POOL_ID }}
-            NEXT_PUBLIC_COGNITO_CLIENT_ID=${{ secrets.NEXT_PUBLIC_COGNITO_CLIENT_ID }}
+            NEXT_PUBLIC_COGNITO_USER_POOL_CLIENT_ID=${{ secrets.NEXT_PUBLIC_COGNITO_CLIENT_ID }}
 
       - name: Output image details
         run: |

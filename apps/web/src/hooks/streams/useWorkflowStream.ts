@@ -7,7 +7,10 @@ import { SSEEventType } from '@/types/sse.types';
 
 interface UseWorkflowStreamOptions {
   projectId: string;
+  userId: string;
+  sessionId?: string;
   workflowExecutionId?: string;
+  agentType?: 'workflow' | 'ai-assistant'; // Default: workflow
   enabled?: boolean;
   onEvent?: (event: SSEEvent) => void;
   onError?: (error: Error) => void;
@@ -18,113 +21,193 @@ interface WorkflowStreamState {
   isConnecting: boolean;
   error: Error | null;
   lastEvent: SSEEvent | null;
+  sessionId: string | null;
 }
 
+/**
+ * Hook for streaming workflow/agent updates via Server-Sent Events (SSE)
+ *
+ * This hook follows the AWS AgentCore streaming pattern:
+ * 1. Makes POST request to BFF endpoint with payload
+ * 2. Receives streaming response in SSE format with "data:" prefix
+ * 3. Parses each event and updates React Query cache
+ * 4. Maintains session ID for conversation context
+ *
+ * For local mode: BFF proxies to Docker FastAPI (URL-based)
+ * For remote mode: BFF uses AWS SDK to invoke AgentCore Runtime
+ */
 export function useWorkflowStream({
   projectId,
+  userId,
+  sessionId: providedSessionId,
   workflowExecutionId,
+  agentType = 'workflow',
   enabled = true,
   onEvent,
   onError,
 }: UseWorkflowStreamOptions) {
   const queryClient = useQueryClient();
-  const eventSourceRef = useRef<EventSource | null>(null);
+  const abortControllerRef = useRef<AbortController | null>(null);
   const reconnectTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const reconnectAttemptsRef = useRef(0);
   const maxReconnectAttempts = 5;
+  
+  // Generate session ID on mount if not provided
+  const [sessionId] = useState(() => providedSessionId || `session-${Date.now()}-${Math.random().toString(36).substring(2, 15)}`);
 
   const [state, setState] = useState<WorkflowStreamState>({
     isConnected: false,
     isConnecting: false,
     error: null,
     lastEvent: null,
+    sessionId,
   });
 
   useEffect(() => {
-    if (!enabled || !workflowExecutionId) {
+    if (!enabled) {
       return;
     }
 
-    const connect = () => {
+    const connect = async () => {
       // Clean up existing connection
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
       }
 
+      abortControllerRef.current = new AbortController();
       setState((prev) => ({ ...prev, isConnecting: true, error: null }));
 
       try {
-        // Construct SSE URL
-        const url = new URL('/api/workflow-agents/invocations/stream', window.location.origin);
-        url.searchParams.set('projectId', projectId);
-        url.searchParams.set('workflowExecutionId', workflowExecutionId);
+        // POST request to BFF with streaming enabled
+        const response = await fetch('/api/workflow-agents/invocations', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'text/event-stream',
+          },
+          body: JSON.stringify({
+            project_id: projectId,
+            user_id: userId,
+            session_id: sessionId,
+            start: !workflowExecutionId, // true if new workflow, false if continuing
+            agent_type: agentType,
+          }),
+          signal: abortControllerRef.current.signal,
+        });
 
-        const eventSource = new EventSource(url.toString());
-        eventSourceRef.current = eventSource;
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+        }
 
-        // Handle connection open
-        eventSource.onopen = () => {
-          setState((prev) => ({
-            ...prev,
-            isConnected: true,
-            isConnecting: false,
-            error: null,
-          }));
-          reconnectAttemptsRef.current = 0;
-        };
+        if (!response.body) {
+          throw new Error('No response body received');
+        }
 
-        // Handle all SSE events
-        eventSource.onmessage = (event) => {
-          try {
-            const sseEvent: SSEEvent = JSON.parse(event.data);
+        setState((prev) => ({
+          ...prev,
+          isConnected: true,
+          isConnecting: false,
+          error: null,
+        }));
+        reconnectAttemptsRef.current = 0;
 
-            setState((prev) => ({ ...prev, lastEvent: sseEvent }));
+        // Read the stream
+        const reader = response.body.getReader();
+        const decoder = new TextDecoder();
+        let buffer = '';
 
-            // Call custom event handler
-            onEvent?.(sseEvent);
+        while (true) {
+          const { done, value } = await reader.read();
 
-            // Update TanStack Query cache based on event type
-            handleCacheUpdate(sseEvent);
-          } catch (error) {
-            console.error('Failed to parse SSE event:', error);
+          if (done) {
+            console.log('[Stream] Connection closed gracefully');
+            break;
           }
-        };
 
-        // Handle errors
-        eventSource.onerror = (error) => {
-          console.error('SSE connection error:', error);
+          // Decode chunk and add to buffer
+          const chunk = decoder.decode(value, { stream: true });
+          buffer += chunk;
 
-          eventSource.close();
-          setState((prev) => ({
-            ...prev,
-            isConnected: false,
-            isConnecting: false,
-            error: new Error('Connection lost'),
-          }));
+          // Process complete lines (split by \n)
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || ''; // Keep incomplete line in buffer
 
-          // Attempt reconnection with exponential backoff
-          if (reconnectAttemptsRef.current < maxReconnectAttempts) {
-            const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
-            reconnectAttemptsRef.current += 1;
+          for (const line of lines) {
+            const trimmedLine = line.trim();
 
-            reconnectTimeoutRef.current = setTimeout(() => {
-              connect();
-            }, delay);
-          } else {
-            const err = new Error('Max reconnection attempts reached');
-            setState((prev) => ({ ...prev, error: err }));
-            onError?.(err);
+            if (trimmedLine === '') {
+              continue; // Skip empty lines
+            }
+
+            // Handle SSE format: "data: {json}"
+            if (trimmedLine.startsWith('data:')) {
+              const dataContent = trimmedLine.substring(5).trim(); // Remove "data:" prefix
+
+              try {
+                const sseEvent: SSEEvent = JSON.parse(dataContent);
+
+                setState((prev) => ({ ...prev, lastEvent: sseEvent }));
+
+                // Call custom event handler
+                onEvent?.(sseEvent);
+
+                // Update TanStack Query cache
+                handleCacheUpdate(sseEvent);
+              } catch (parseError) {
+                console.warn('[Stream] Failed to parse SSE event:', dataContent, parseError);
+              }
+            } else {
+              // Try parsing as JSON (no "data:" prefix)
+              try {
+                const sseEvent: SSEEvent = JSON.parse(trimmedLine);
+
+                setState((prev) => ({ ...prev, lastEvent: sseEvent }));
+                onEvent?.(sseEvent);
+                handleCacheUpdate(sseEvent);
+              } catch (parseError) {
+                console.warn('[Stream] Failed to parse line:', trimmedLine, parseError);
+              }
+            }
           }
-        };
-      } catch (error) {
-        const err = error instanceof Error ? error : new Error('Failed to connect to SSE');
+        }
+
+        // Connection closed
         setState((prev) => ({
           ...prev,
           isConnected: false,
           isConnecting: false,
-          error: err,
         }));
-        onError?.(err);
+
+      } catch (error) {
+        if (error instanceof Error && error.name === 'AbortError') {
+          console.log('[Stream] Connection aborted');
+          return;
+        }
+
+        console.error('[Stream] Connection error:', error);
+
+        setState((prev) => ({
+          ...prev,
+          isConnected: false,
+          isConnecting: false,
+          error: error instanceof Error ? error : new Error('Stream connection failed'),
+        }));
+
+        // Attempt reconnection with exponential backoff
+        if (reconnectAttemptsRef.current < maxReconnectAttempts) {
+          const delay = Math.min(1000 * Math.pow(2, reconnectAttemptsRef.current), 30000);
+          reconnectAttemptsRef.current += 1;
+
+          console.log(`[Stream] Reconnecting in ${delay}ms (attempt ${reconnectAttemptsRef.current}/${maxReconnectAttempts})`);
+
+          reconnectTimeoutRef.current = setTimeout(() => {
+            connect();
+          }, delay);
+        } else {
+          const err = new Error('Max reconnection attempts reached');
+          setState((prev) => ({ ...prev, error: err }));
+          onError?.(err);
+        }
       }
     };
 
@@ -203,21 +286,21 @@ export function useWorkflowStream({
 
     // Cleanup on unmount
     return () => {
-      if (eventSourceRef.current) {
-        eventSourceRef.current.close();
-        eventSourceRef.current = null;
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+        abortControllerRef.current = null;
       }
       if (reconnectTimeoutRef.current) {
         clearTimeout(reconnectTimeoutRef.current);
         reconnectTimeoutRef.current = null;
       }
     };
-  }, [enabled, projectId, workflowExecutionId, onEvent, onError, queryClient]);
+  }, [enabled, projectId, userId, sessionId, workflowExecutionId, agentType, onEvent, onError, queryClient]);
 
   const disconnect = () => {
-    if (eventSourceRef.current) {
-      eventSourceRef.current.close();
-      eventSourceRef.current = null;
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+      abortControllerRef.current = null;
     }
     if (reconnectTimeoutRef.current) {
       clearTimeout(reconnectTimeoutRef.current);
@@ -228,6 +311,7 @@ export function useWorkflowStream({
       isConnecting: false,
       error: null,
       lastEvent: null,
+      sessionId,
     });
   };
 

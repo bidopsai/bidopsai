@@ -1,0 +1,68 @@
+# =============================================================================
+# BidOpsAI Workflow Supervisor Agent - Development Dockerfile
+# =============================================================================
+# This Dockerfile is optimized for local development with hot-reload support
+# Uses UV for fast dependency installation and Python 3.12+
+
+FROM python:3.12-slim
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    UV_CACHE_DIR=/root/.cache/uv
+
+# Set working directory
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    curl \
+    git \
+    gcc \
+    g++ \
+    make \
+    libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install UV package manager and ensure it's in PATH immediately
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    ln -s /root/.local/bin/uv /usr/local/bin/uv && \
+    ln -s /root/.local/bin/uvx /usr/local/bin/uvx
+
+# Copy only dependency files first (for layer caching)
+COPY agents-core/pyproject.toml agents-core/uv.lock* agents-core/README.md ./
+
+# Install dependencies with UV directly to system (no venv for Docker)
+# Use --system flag to install globally instead of in a venv
+RUN uv pip install --system --no-cache -e . || \
+    (echo "Direct install failed, trying with all extras..." && \
+     uv pip install --system --no-cache fastapi uvicorn psycopg2-binary boto3 strands-agents langchain anthropic openai)
+
+# Install development tools
+RUN uv pip install --system --no-cache debugpy ipython ipdb
+
+# Copy application code
+COPY agents-core/ ./
+
+# Create necessary directories
+RUN mkdir -p logs temp
+
+# Expose port for FastAPI
+EXPOSE 8001
+
+# Expose port for debugpy (optional)
+EXPOSE 5678
+
+# Health check - using AgentCore's built-in /ping endpoint
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD curl -f http://localhost:8001/ping || exit 1
+
+# Run with uvicorn and hot-reload using watchfiles with polling
+# Install watchfiles with polling support
+RUN uv pip install --system --no-cache watchfiles
+
+# Run with uvicorn and hot-reload using WATCHFILES_FORCE_POLLING
+# This enables polling mode which works reliably with Docker volumes
+CMD ["sh", "-c", "WATCHFILES_FORCE_POLLING=true uvicorn supervisors.workflow.agent_executor:app --host 0.0.0.0 --port 8001 --reload --reload-dir /app/supervisors --reload-dir /app/tools --reload-dir /app/prompts --reload-dir /app/models --reload-dir /app/core --log-level debug"]

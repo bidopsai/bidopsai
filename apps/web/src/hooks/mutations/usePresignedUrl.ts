@@ -23,6 +23,7 @@ interface PresignedUrlInput {
 interface PresignedUrl {
   url: string;
   fileName: string;
+  key: string;
   expiresAt: string;
 }
 

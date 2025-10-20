@@ -150,6 +150,7 @@ export const GENERATE_PRESIGNED_URLS = gql`
     generatePresignedUrls(projectId: $projectId, files: $files) {
       url
       fileName
+      key
       expiresAt
     }
   }

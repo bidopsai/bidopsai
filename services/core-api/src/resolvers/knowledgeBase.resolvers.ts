@@ -383,6 +383,13 @@ export const knowledgeBaseResolvers = {
   },
 
   KnowledgeBaseDocument: {
+    fileSize: (parent: any) => {
+      // Convert BigInt to number for GraphQL Int type
+      return typeof parent.fileSize === 'bigint'
+        ? Number(parent.fileSize)
+        : parent.fileSize;
+    },
+
     uploadedBy: async (parent: any, _: any, context: GraphQLContext) => {
       if (parent.uploader) return parent.uploader;
       return context.prisma.user.findUnique({ where: { id: parent.uploadedBy } });

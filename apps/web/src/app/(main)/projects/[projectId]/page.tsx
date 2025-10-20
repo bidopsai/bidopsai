@@ -9,15 +9,17 @@ import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Separator } from '@/components/ui/separator';
 import { Skeleton } from '@/components/ui/skeleton';
+import { useAuth } from '@/hooks/useAuth';
 import { useProject } from '@/hooks/queries/useProject';
 import { useWorkflowExecution } from '@/hooks/queries/useWorkflowExecution';
 import { useWorkflowStream } from '@/hooks/streams/useWorkflowStream';
+import { useStartWorkflow, useSendAgentMessage } from '@/hooks/mutations';
 import type { SSEEvent } from '@/types/sse.types';
 import { SSEEventType } from '@/types/sse.types';
 import type { WorkflowStep } from '@/types/workflow.types';
 import { AgentTaskStatus } from '@/types/workflow.types';
 import { formatDate } from '@/utils/date';
-import { AlertCircle, ArrowLeft, Play, Users } from 'lucide-react';
+import { AlertCircle, ArrowLeft, Loader2, Play, Users } from 'lucide-react';
 import Link from 'next/link';
 import { useParams } from 'next/navigation';
 import { useCallback, useMemo, useState } from 'react';
@@ -26,6 +28,9 @@ import { toast } from 'sonner';
 export default function ProjectDetailPage() {
   const params = useParams();
   const projectId = params.projectId as string;
+
+  // Get current user
+  const { user } = useAuth();
 
   // State for chat messages
   const [messages, setMessages] = useState<ChatMessageProps[]>([]);
@@ -102,11 +107,13 @@ export default function ProjectDetailPage() {
     }
   }, []);
 
-  // Connect to SSE stream
+  // Connect to SSE stream when workflow exists
   const { isConnected, error: sseError } = useWorkflowStream({
     projectId,
+    userId: user?.userId || '',
+    sessionId: latestWorkflowId,
     workflowExecutionId: latestWorkflowId,
-    enabled: !!latestWorkflowId,
+    enabled: !!latestWorkflowId && !!user?.userId,
     onEvent: handleSSEEvent,
     onError: (error) => {
       toast.error('Connection lost', {
@@ -115,12 +122,56 @@ export default function ProjectDetailPage() {
     },
   });
 
+  // Start workflow mutation
+  const startWorkflowMutation = useStartWorkflow();
+
+  // Handle starting workflow
+  const handleStartWorkflow = useCallback(async () => {
+    if (!user?.userId) {
+      toast.error('You must be signed in to start a workflow');
+      return;
+    }
+
+    // Set UI states
+    setIsStreaming(true);
+    setIsThinking(true);
+    setCurrentAgentName('Supervisor Agent');
+
+    // Add initial system message
+    const initialMessage: ChatMessageProps = {
+      id: `msg-${Date.now()}`,
+      type: 'agent',
+      content: '🚀 Workflow started! Initializing agents and setting up tasks...',
+      timestamp: new Date(),
+      agentName: 'System',
+    };
+    setMessages([initialMessage]);
+
+    // Call mutation
+    await startWorkflowMutation.mutateAsync({
+      projectId,
+      userId: user.userId,
+    });
+
+    // The streaming will be handled by useWorkflowStream hook
+    // which will auto-connect when latestWorkflowId becomes available
+  }, [projectId, user, startWorkflowMutation]);
+
+  // Send message mutation
+  const sendMessageMutation = useSendAgentMessage();
+
   // Handle sending messages
   const handleSendMessage = useCallback(
     async (message: string) => {
-      // Add user message to chat
+      if (!user?.userId || !latestWorkflowId) {
+        toast.error('Cannot send message: session not initialized');
+        return;
+      }
+
+      // Add user message to chat with sending status
+      const messageId = `msg-${Date.now()}`;
       const userMessage: ChatMessageProps = {
-        id: `msg-${Date.now()}`,
+        id: messageId,
         type: 'user',
         content: message,
         timestamp: new Date(),
@@ -130,37 +181,31 @@ export default function ProjectDetailPage() {
       setIsStreaming(true);
 
       try {
-        // TODO: Send message to AgentCore via API route
-        // const response = await fetch('/api/workflow-agents/invocations', {
-        //   method: 'POST',
-        //   headers: { 'Content-Type': 'application/json' },
-        //   body: JSON.stringify({
-        //     projectId,
-        //     userId: 'current-user-id',
-        //     sessionId: latestWorkflowId,
-        //     start: false,
-        //     userInput: { chat: message },
-        //   }),
-        // });
+        // Send message via mutation hook
+        await sendMessageMutation.mutateAsync({
+          projectId,
+          userId: user.userId,
+          sessionId: latestWorkflowId,
+          message,
+        });
 
-        // Update message status
+        // Update message status to sent
         setMessages((prev) =>
           prev.map((msg) =>
-            msg.id === userMessage.id ? { ...msg, status: 'sent' as const } : msg
+            msg.id === messageId ? { ...msg, status: 'sent' as const } : msg
           )
         );
-      } catch (error) {
-        console.error('Failed to send message:', error);
+      } catch {
+        // Update message status to error (error is handled by mutation hook)
         setMessages((prev) =>
           prev.map((msg) =>
-            msg.id === userMessage.id ? { ...msg, status: 'error' as const } : msg
+            msg.id === messageId ? { ...msg, status: 'error' as const } : msg
           )
         );
         setIsStreaming(false);
-        toast.error('Failed to send message');
       }
     },
-    [projectId, latestWorkflowId]
+    [projectId, latestWorkflowId, user, sendMessageMutation]
   );
 
   // Map workflow execution to progress steps
@@ -296,9 +341,22 @@ export default function ProjectDetailPage() {
             Manage Team
           </Button>
           {!workflowExecution && (
-            <Button size="sm">
-              <Play className="h-4 w-4 mr-2" />
-              Start Workflow
+            <Button
+              size="sm"
+              onClick={handleStartWorkflow}
+              disabled={startWorkflowMutation.isPending || !user?.userId}
+            >
+              {startWorkflowMutation.isPending ? (
+                <>
+                  <Loader2 className="h-4 w-4 mr-2 animate-spin" />
+                  Starting...
+                </>
+              ) : (
+                <>
+                  <Play className="h-4 w-4 mr-2" />
+                  Start Workflow
+                </>
+              )}
             </Button>
           )}
         </div>

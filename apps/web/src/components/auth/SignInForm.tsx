@@ -1,6 +1,6 @@
 /**
  * Sign In Form Component
- * 
+ *
  * Provides username/password authentication with Google OAuth option.
  * Integrates with AWS Cognito through useAuth hook.
  */
@@ -50,10 +50,10 @@ export function SignInForm({ onSuccess }: SignInFormProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const redirectTo = searchParams?.get('redirect') || '/dashboard';
-  
+
   const [isGoogleLoading, setIsGoogleLoading] = useState(false);
   const [isCheckingAuth, setIsCheckingAuth] = useState(true);
-  
+
   const signInMutation = useSignIn();
 
   /**
@@ -96,7 +96,7 @@ export function SignInForm({ onSuccess }: SignInFormProps) {
     try {
       console.log('🔐 Sign in form submitted:', { username: values.username });
       console.log('📞 Calling signInMutation.mutate...');
-      
+
       signInMutation.mutate(values, {
         onSuccess: (result) => {
           console.log('✅ Sign in result:', result);
@@ -104,7 +104,7 @@ export function SignInForm({ onSuccess }: SignInFormProps) {
             console.log('🎉 User is signed in! Redirecting to:', redirectTo);
             // Call success callback if provided
             onSuccess?.();
-            
+
             // Redirect to target page
             router.push(redirectTo);
           } else {
@@ -116,14 +116,14 @@ export function SignInForm({ onSuccess }: SignInFormProps) {
           console.error('❌ Sign in mutation error:', error);
         },
       });
-      
+
       console.log('📤 Mutation triggered, waiting for response...');
     } catch (error) {
       // Form validation errors are handled by React Hook Form
       console.error('❌ Form submission error:', error);
     }
   }
-  
+
   /**
    * Handle form errors
    */
@@ -237,16 +237,7 @@ export function SignInForm({ onSuccess }: SignInFormProps) {
             name="password"
             render={({ field }) => (
               <FormItem>
-                <div className="flex items-center justify-between">
-                  <FormLabel>Password</FormLabel>
-                  <Link
-                    href="/reset-password"
-                    className="text-sm text-primary hover:underline"
-                    tabIndex={-1}
-                  >
-                    Forgot password?
-                  </Link>
-                </div>
+                <FormLabel>Password</FormLabel>
                 <FormControl>
                   <Input
                     {...field}

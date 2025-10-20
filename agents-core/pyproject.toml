@@ -1,0 +1,208 @@
+[project]
+name = "bidopsai-agents"
+version = "0.1.0"
+description = "AWS AgentCore-based agentic system for automated bid preparation"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { text = "MIT" }
+authors = [
+    { name = "BidOpsAI Team", email = "support@bidopsai.com" }
+]
+keywords = ["ai", "agents", "aws", "bedrock", "agentcore", "strands"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Software Development :: Libraries :: Application Frameworks",
+]
+
+dependencies = [
+    # Core framework - AWS AgentCore SDK
+    "bedrock-agentcore>=1.0.0",
+    "bedrock-agentcore-starter-toolkit>=0.1.0,<1.0.0",
+    # Strands Agent Framework (explicit dependency)
+    "strands-agents>=1.12.0",
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    # Data validation and LLM structured outputs
+    "pydantic>=2.9.0",
+    "pydantic-settings>=2.5.0",
+    # Database
+    "asyncpg>=0.29.0",
+    "prisma>=0.14.0",
+    # AWS SDK
+    "boto3>=1.35.0",
+    "botocore>=1.35.0",
+    # LLM Providers
+    "anthropic>=0.39.0",  # For AI Assistant intent classification
+    # MCP and tools
+    "mcp>=1.0.0",
+    # SSE streaming
+    "sse-starlette>=2.1.0",
+    # Observability - LangFuse
+    "langfuse>=2.50.0",
+    # Observability - OpenTelemetry (OTEL)
+    "opentelemetry-api>=1.27.0",
+    "opentelemetry-sdk>=1.27.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.27.0",
+    "opentelemetry-instrumentation>=0.48b0",
+    # Utilities
+    "python-dotenv>=1.0.0",
+    "httpx>=0.27.0",
+    "tenacity>=9.0.0",
+    "python-json-logger>=2.0.7",
+    # Date/time
+    "python-dateutil>=2.9.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    # Testing
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=5.0.0",
+    "pytest-mock>=3.14.0",
+    "pytest-timeout>=2.3.0",
+    
+    # Code quality
+    "ruff>=0.6.0",
+    "mypy>=1.11.0",
+    "black>=24.8.0",
+    "isort>=5.13.0",
+    
+    # Development tools
+    "ipython>=8.26.0",
+    "ipdb>=0.13.13",
+    "debugpy>=1.8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = [
+    "agents",
+    "supervisors",
+    "tools",
+    "core",
+    "models",
+    "prompts",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest>=8.3.0",
+    "pytest-asyncio>=0.24.0",
+    "pytest-cov>=5.0.0",
+    "pytest-mock>=3.14.0",
+    "ruff>=0.6.0",
+    "mypy>=1.11.0",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+    "--cov=agents",
+    "--cov=supervisors",
+    "--cov=tools",
+    "--cov=core",
+    "--cov-report=term-missing",
+    "--cov-report=html",
+]
+markers = [
+    "unit: Unit tests",
+    "integration: Integration tests",
+    "contract: API contract tests",
+    "slow: Slow running tests",
+]
+
+[tool.coverage.run]
+source = ["agents", "supervisors", "tools", "core", "models"]
+omit = [
+    "*/tests/*",
+    "*/test_*.py",
+    "*/__pycache__/*",
+    "*/migrations/*",
+]
+
+[tool.coverage.report]
+precision = 2
+show_missing = true
+skip_covered = false
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "if TYPE_CHECKING:",
+    "class .*\\bProtocol\\):",
+    "@(abc\\.)?abstractmethod",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "C4",  # flake8-comprehensions
+    "UP",  # pyupgrade
+]
+ignore = [
+    "E501",  # line too long (handled by black)
+    "B008",  # do not perform function calls in argument defaults
+    "C901",  # too complex
+]
+
+[tool.ruff.per-file-ignores]
+"__init__.py" = ["F401"]
+
+[tool.mypy]
+python_version = "3.12"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
+disallow_untyped_calls = false
+disallow_untyped_decorators = false
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+follow_imports = "normal"
+ignore_missing_imports = true
+
+[tool.black]
+line-length = 100
+target-version = ['py312']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 100
