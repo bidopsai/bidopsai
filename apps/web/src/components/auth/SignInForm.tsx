@@ -237,16 +237,7 @@ export function SignInForm({ onSuccess }: SignInFormProps) {
             name="password"
             render={({ field }) => (
               <FormItem>
-                <div className="flex items-center justify-between">
-                  <FormLabel>Password</FormLabel>
-                  <Link
-                    href="/reset-password"
-                    className="text-sm text-primary hover:underline"
-                    tabIndex={-1}
-                  >
-                    Forgot password?
-                  </Link>
-                </div>
+                <FormLabel>Password</FormLabel>
                 <FormControl>
                   <Input
                     {...field}
