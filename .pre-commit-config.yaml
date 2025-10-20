@@ -1,0 +1,58 @@
+# Pre-commit hooks to prevent committing sensitive data
+# Install: pip install pre-commit && pre-commit install
+# Run manually: pre-commit run --all-files
+
+repos:
+  # Detect secrets and sensitive information
+  - repo: https://github.com/Yelp/detect-secrets
+    rev: v1.4.0
+    hooks:
+      - id: detect-secrets
+        exclude: ^(package-lock\.json|node_modules/|\.next/|\.turbo/|docs/|specs/|\.specify/|infra/)
+
+  # Standard pre-commit hooks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v4.5.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=500"]
+      - id: check-merge-conflict
+      - id: check-yaml
+        args: ["--unsafe"] # Allow custom YAML tags
+        exclude: ^(specs/.*\.yaml|\.specify/|infra/)
+      - id: check-json
+        exclude: ^(package-lock\.json|node_modules/|infra/)
+      - id: trailing-whitespace
+        exclude: ^(\.specify/|\.next/|node_modules/|infra/)
+      - id: end-of-file-fixer
+        exclude: ^(\.specify/|\.next/|node_modules/|infra/)
+      - id: detect-private-key
+
+  # Custom hook to detect AWS credentials and ARNs
+  - repo: local
+    hooks:
+      - id: check-aws-credentials
+        name: Check for AWS credentials and ARNs
+        entry: bash -c 'if grep -rHn --include="*.ts" --include="*.tsx" --include="*.js" --include="*.jsx" --include="*.py" --include="*.json" --include="*.yaml" --include="*.yml" --exclude-dir=node_modules --exclude-dir=.next --exclude-dir=.turbo --exclude-dir=docs --exclude-dir=specs --exclude-dir=infra -E "(arn:aws:[a-z0-9-]+:[a-z0-9-]+:[0-9]{12}:|AKIA[0-9A-Z]{16}|aws_secret_access_key\s*[=:]|aws_access_key_id\s*[=:])" .; then echo "❌ Found potential AWS credentials or real ARNs in code! Use environment variables or AWS SSM instead."; exit 1; fi'
+        language: system
+        pass_filenames: false
+        always_run: true
+
+  # TypeScript/JavaScript formatting (apps/web and services/core-api)
+  - repo: https://github.com/pre-commit/mirrors-prettier
+    rev: v3.1.0
+    hooks:
+      - id: prettier
+        types_or: [javascript, jsx, ts, tsx, json, yaml, markdown]
+        exclude: ^(package-lock\.json|node_modules/|\.next/|\.turbo/|docs/|specs/|infra/)
+        args: ["--write", "--ignore-unknown"]
+
+  # Python code formatting (agentcore)
+  - repo: https://github.com/psf/black
+    rev: 24.1.1
+    hooks:
+      - id: black
+        language_version: python3.12
+        args: ["--target-version=py312"]
+        files: ^agentcore/
+        exclude: ^infra/
