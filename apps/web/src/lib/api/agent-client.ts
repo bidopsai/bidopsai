@@ -91,12 +91,19 @@ export async function invokeBFFAgent(
 
 /**
  * Generates a unique session ID for agent conversations
- * Format: session-{timestamp}-{random}
+ * AWS AgentCore requires session IDs to be at least 33 characters
+ * Format: session-{timestamp}-{uuid}
  */
 export function generateSessionId(): string {
   const timestamp = Date.now();
-  const random = Math.random().toString(36).substring(2, 15);
-  return `session-${timestamp}-${random}`;
+  // Generate a UUID-like random string (32 characters without dashes)
+  const uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = Math.random() * 16 | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+  // Format: session-{timestamp}-{uuid} = 8 + 13 + 1 + 36 = 58 characters (well above 33)
+  return `session-${timestamp}-${uuid}`;
 }
 
 // ============================================

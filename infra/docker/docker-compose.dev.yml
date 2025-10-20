@@ -81,9 +81,20 @@ services:
       # Use localhost for browser access to API
       - NEXT_PUBLIC_API_URL=http://localhost:4000
       - NEXT_PUBLIC_AGENT_CORE_URL=http://localhost:5000
-      # Server-side agent URLs (inside Docker network)
-      - WORKFLOW_AGENT_URL=http://workflow-agent:8001
-      - AI_ASSISTANT_AGENT_URL=http://ai-assistant-agent:8002
+      # Server-side agent URLs (inside Docker network) - COMMENTED OUT FOR REMOTE MODE
+      # - WORKFLOW_AGENT_URL=http://workflow-agent:8001
+      # - AI_ASSISTANT_AGENT_URL=http://ai-assistant-agent:8002
+      # Remote AgentCore Runtime Configuration (from .env file)
+      - WORKFLOW_AGENT_RUNTIME_ARN=${WORKFLOW_AGENT_RUNTIME_ARN}
+      - AI_ASSISTANT_AGENT_RUNTIME_ARN=${AI_ASSISTANT_AGENT_RUNTIME_ARN}
+      - WORKFLOW_AGENT_ENDPOINT_NAME=${WORKFLOW_AGENT_ENDPOINT_NAME:-workflow-supervisor}
+      - AI_ASSISTANT_AGENT_ENDPOINT_NAME=${AI_ASSISTANT_AGENT_ENDPOINT_NAME:-ai-assistant-supervisor}
+      - AWS_REGION=${AWS_REGION:-ap-southeast-2}
+      # AWS Credentials (pass from host environment or .env file)
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
+      # Polling for hot reload
       - WATCHPACK_POLLING=true
       - CHOKIDAR_USEPOLLING=true
     networks:
