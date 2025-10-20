@@ -11,11 +11,9 @@ WORKDIR /app
 
 # Copy package files
 COPY apps/web/package*.json ./
-COPY apps/web/pnpm-lock.yaml* ./
 
 # Install dependencies
-RUN corepack enable pnpm && \
-    pnpm install --frozen-lockfile --prod=false
+RUN npm ci --only=production=false
 
 # Build the application
 FROM base AS builder
