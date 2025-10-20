@@ -1,0 +1,118 @@
+version: '3.8'
+
+# Remote AgentCore Development Configuration
+# This docker-compose file runs only the web app and core-api
+# All agent requests go to remote AWS AgentCore runtime
+# Use this to test remote agent connectivity without local infrastructure
+
+services:
+  # PostgreSQL Database (still needed for core-api)
+  postgres:
+    image: postgres:14-alpine
+    container_name: bidopsai-postgres-remote
+    ports:
+      - "5432:5432"
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-bidopsai}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-bidopsai_dev_password}
+      - POSTGRES_DB=${POSTGRES_DB:-bidopsai}
+    volumes:
+      - postgres-remote-data:/var/lib/postgresql/data
+    networks:
+      - bidopsai-remote-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-bidopsai}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # GraphQL Core API
+  core-api:
+    build:
+      context: ../../
+      dockerfile: infra/docker/services/core-api/Dockerfile.dev
+    container_name: bidopsai-core-api-remote
+    ports:
+      - "4000:4000"
+    volumes:
+      # Mount source code for hot reload
+      - ../../services/core-api:/app
+      # Preserve node_modules and generated Prisma client
+      - /app/node_modules
+      - /app/node_modules/.prisma
+      # Mount prisma for migrations
+      - ../../services/core-api/prisma:/app/prisma
+    env_file:
+      - ../../services/core-api/.env.development
+    environment:
+      # Override DATABASE_URL for Docker network
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-bidopsai}:${POSTGRES_PASSWORD:-bidopsai_dev_password}@postgres:5432/${POSTGRES_DB:-bidopsai}
+      - NODE_ENV=development
+      - PORT=4000
+    networks:
+      - bidopsai-remote-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:4000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Frontend Web Application (Remote Agent Mode)
+  web:
+    build:
+      context: ../../
+      dockerfile: infra/docker/apps/web/Dockerfile.dev
+    container_name: bidopsai-web-remote
+    ports:
+      - "3000:3000"
+    depends_on:
+      core-api:
+        condition: service_healthy
+    volumes:
+      # Mount source code for hot reload
+      - ../../apps/web:/app
+      # Preserve node_modules
+      - /app/node_modules
+    env_file:
+      - ../../apps/web/.env
+    environment:
+      - NODE_ENV=development
+      # Use localhost for browser access to API
+      - NEXT_PUBLIC_API_URL=http://localhost:4000
+      # Remote AgentCore Runtime Configuration (from root .env)
+      - WORKFLOW_AGENT_RUNTIME_ARN=${WORKFLOW_AGENT_RUNTIME_ARN}
+      - AI_ASSISTANT_AGENT_RUNTIME_ARN=${AI_ASSISTANT_AGENT_RUNTIME_ARN}
+      - WORKFLOW_AGENT_ENDPOINT_NAME=${WORKFLOW_AGENT_ENDPOINT_NAME:-workflow-supervisor}
+      - AI_ASSISTANT_AGENT_ENDPOINT_NAME=${AI_ASSISTANT_AGENT_ENDPOINT_NAME:-ai-assistant-supervisor}
+      - AWS_REGION=${AWS_REGION:-ap-southeast-2}
+      # AWS Credentials (passed from root .env)
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
+      # Hot reload settings
+      - WATCHPACK_POLLING=true
+      - CHOKIDAR_USEPOLLING=true
+    networks:
+      - bidopsai-remote-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:3000"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+volumes:
+  postgres-remote-data:
+    driver: local
+
+networks:
+  bidopsai-remote-network:
+    driver: bridge
+    name: bidopsai-remote-network
