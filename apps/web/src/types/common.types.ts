@@ -51,5 +51,6 @@ export interface FileUploadMetadata {
 export interface PresignedUrlResponse {
   url: string;
   fileName: string;
+  key: string;
   expiresAt: string;
 }

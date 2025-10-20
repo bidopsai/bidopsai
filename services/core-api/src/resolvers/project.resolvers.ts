@@ -586,6 +586,7 @@ export const projectResolvers = {
       return presignedUrls.map((url) => ({
         url: url.url,
         fileName: url.fileName,
+        key: url.key,
         expiresAt: url.expiresAt.toISOString(),
       }));
     },

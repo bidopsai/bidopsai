@@ -114,8 +114,13 @@ export default function NewProjectPage() {
         toast.loading('Saving document records...', { id: 'save-docs' });
         
         try {
-          // Get S3 bucket from environment or presigned URL
-          const bucketName = process.env.NEXT_PUBLIC_S3_BUCKET || 'bidopsai-documents';
+          // Extract bucket name from first presigned URL
+          let bucketName = process.env.NEXT_PUBLIC_S3_PROJECT_DOCUMENTS_BUCKET;
+          if (!bucketName && presignedUrls.length > 0) {
+            // Extract bucket from presigned URL: https://{bucket}.s3.{region}.amazonaws.com/{key}
+            const urlMatch = presignedUrls[0].url.match(/https:\/\/([^.]+)\.s3\./);
+            bucketName = urlMatch ? urlMatch[1] : 'bidopsai-project-documents-dev-058264088919';
+          }
           
           // Create a database record for each uploaded file
           for (let i = 0; i < data.documents.length; i++) {
@@ -125,10 +130,10 @@ export default function NewProjectPage() {
             await createProjectDocument({
               projectId: project.id,
               fileName: file.name,
-              filePath: presignedUrl.fileName, // S3 key path (yyyy/mm/dd/hh/...)
+              filePath: presignedUrl.key || presignedUrl.fileName, // Use 'key' property which has the full S3 path
               fileType: file.type,
               fileSize: file.size,
-              rawFileLocation: `s3://${bucketName}/${presignedUrl.fileName}`, // Full S3 URL
+              rawFileLocation: `s3://${bucketName}/${presignedUrl.key || presignedUrl.fileName}`, // Full S3 URL with correct key
             });
           }
           

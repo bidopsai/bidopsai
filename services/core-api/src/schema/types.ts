@@ -261,6 +261,7 @@ export const typeTypeDefs = `#graphql
   type PresignedUrl {
     url: String!
     fileName: String!
+    key: String!
     expiresAt: DateTime!
   }
   
