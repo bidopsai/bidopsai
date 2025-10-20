@@ -13,7 +13,7 @@ WORKDIR /app
 COPY apps/web/package*.json ./
 
 # Install dependencies
-RUN npm ci --only=production=false
+RUN npm ci
 
 # Build the application
 FROM base AS builder

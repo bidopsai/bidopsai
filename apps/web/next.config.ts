@@ -1,16 +1,13 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  /* config options here */
-  output: 'standalone',
+  output: "standalone", // Required for Docker builds
   eslint: {
-    // Warning: This allows production builds to successfully complete even if
-    // your project has ESLint errors.
+    // Disable ESLint during production builds
     ignoreDuringBuilds: true,
   },
   typescript: {
-    // Warning: This allows production builds to successfully complete even if
-    // your project has type errors.
+    // Disable TypeScript errors during production builds (optional, be careful!)
     ignoreBuildErrors: true,
   },
 };
