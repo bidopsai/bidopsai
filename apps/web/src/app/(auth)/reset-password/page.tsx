@@ -1,6 +1,6 @@
 /**
  * Password Reset Page - Disabled
- * 
+ *
  * This page is disabled. Users should contact an administrator
  * if they need a password reset.
  */
