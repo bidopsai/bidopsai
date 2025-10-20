@@ -83,6 +83,13 @@ export async function POST(request: NextRequest) {
     // Get agent configuration to determine mode
     const config = getAgentConfig(agent_type);
     
+    // Log mode with clear visual indicator
+    console.log(`\n${'='.repeat(60)}`);
+    console.log(`🤖 AGENT MODE: ${config.mode.toUpperCase()}`);
+    console.log(`📋 Agent Type: ${agent_type}`);
+    console.log(`${config.mode === 'local' ? '🏠 Local URL: ' + config.localUrl : '☁️  Runtime ARN: ' + config.runtimeArn}`);
+    console.log(`${'='.repeat(60)}\n`);
+    
     console.log(`[BFF] Invoking ${agent_type} agent in ${config.mode} mode`, {
       project_id,
       user_id,
@@ -93,7 +100,7 @@ export async function POST(request: NextRequest) {
     // Invoke agent based on mode (local vs remote)
     if (config.mode === 'local') {
       // Local mode: URL-based streaming to Docker FastAPI
-      console.log(`[BFF] Invoking local agent with URL-based streaming`);
+      console.log(`[BFF] 🏠 LOCAL MODE: URL-based streaming to ${config.localUrl}`);
       
       const response = await invokeAgentWithRetry(agent_type, payload, {
         maxAttempts: 3,
@@ -124,7 +131,7 @@ export async function POST(request: NextRequest) {
       throw new Error('Unexpected response type from local agent');
     } else {
       // Remote mode: AWS SDK-based streaming to AgentCore Runtime
-      console.log(`[BFF] Invoking remote agent with AWS SDK-based streaming`);
+      console.log(`[BFF] ☁️  REMOTE MODE: AWS SDK-based streaming to AgentCore Runtime`);
       
       const stream = await invokeRemoteAgentStream(agent_type, payload);
       
