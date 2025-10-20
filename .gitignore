@@ -82,17 +82,66 @@ infra/cloud-formation/*.template.json
 infra/cloud-formation/*.template.yaml
 
 # ============================================
-# AGENT-CORE SERVICE
+# AGENT-CORE SERVICE (Python 3.12+ with UV)
 # ============================================
 
+# Python bytecode and cache
 agents-core/**/__pycache__/
 agents-core/**/*.pyc
 agents-core/**/*.pyo
 agents-core/**/*.pyd
+agents-core/**/*.py[cod]
+agents-core/**/*$py.class
+
+# Virtual environments
 agents-core/.Python
 agents-core/**/venv/
 agents-core/**/env/
 agents-core/**/.venv/
+agents-core/**/ENV/
+
+# UV package manager
+agents-core/uv.lock
+agents-core/.uv/
+
+# Distribution / packaging
+agents-core/**/*.egg-info/
+agents-core/**/dist/
+agents-core/**/build/
+agents-core/**/.eggs/
+agents-core/**/*.egg
+
+# PyInstaller
+agents-core/**/*.manifest
+agents-core/**/*.spec
+
+# Unit test / coverage reports
+agents-core/.pytest_cache/
+agents-core/**/.coverage
+agents-core/**/htmlcov/
+agents-core/**/.tox/
+agents-core/**/.nox/
+
+# Type checking
+agents-core/**/.mypy_cache/
+agents-core/**/.dmypy.json
+agents-core/**/dmypy.json
+agents-core/**/.pytype/
+agents-core/**/.pyre/
+
+# Jupyter Notebook
+agents-core/**/.ipynb_checkpoints
+
+# IPython
+agents-core/**/profile_default/
+agents-core/**/ipython_config.py
+
+# Celery
+agents-core/**/celerybeat-schedule
+agents-core/**/celerybeat.pid
+
+# Local development
+agents-core/.env.development
 
 # ============================================
 # IDE AND EDITORS

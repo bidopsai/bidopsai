@@ -1,0 +1,47 @@
+# Development Dockerfile for AI Assistant Supervisor
+# Hot-reload enabled for rapid development
+
+FROM python:3.12-slim
+
+WORKDIR /app
+
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    curl \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install UV package manager and ensure it's in PATH immediately
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh && \
+    ln -s /root/.local/bin/uv /usr/local/bin/uv && \
+    ln -s /root/.local/bin/uvx /usr/local/bin/uvx
+
+# Copy project files
+COPY agents-core/pyproject.toml agents-core/uv.lock* agents-core/README.md ./
+
+# Install dependencies with UV directly to system (no venv for Docker)
+RUN uv pip install --system --no-cache -e . || \
+    (echo "Direct install failed, trying with all extras..." && \
+     uv pip install --system --no-cache fastapi uvicorn psycopg2-binary boto3 strands-agents langchain anthropic openai)
+
+# Install development tools
+RUN uv pip install --system --no-cache debugpy ipython ipdb
+
+# Install watchfiles with polling support
+RUN uv pip install --system --no-cache watchfiles
+
+# Copy source code
+COPY agents-core/ ./
+
+# Expose port 8002 (AI Assistant Agent)
+EXPOSE 8002
+
+# Set environment variables
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV LOG_LEVEL=DEBUG
+
+# Run with uvicorn and hot-reload using watchfiles with polling
+# This enables polling mode which works reliably with Docker volumes
+CMD ["sh", "-c", "WATCHFILES_FORCE_POLLING=true uvicorn supervisors.ai_assistant.agent_executor:app --host 0.0.0.0 --port 8002 --reload --reload-dir /app/supervisors --reload-dir /app/tools --reload-dir /app/prompts --reload-dir /app/models --reload-dir /app/core --log-level debug"]

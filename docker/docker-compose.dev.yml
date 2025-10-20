@@ -81,6 +81,20 @@ services:
       # Use localhost for browser access to API
       - NEXT_PUBLIC_API_URL=http://localhost:4000
       - NEXT_PUBLIC_AGENT_CORE_URL=http://localhost:5000
+      # Server-side agent URLs (inside Docker network) - COMMENTED OUT FOR REMOTE MODE
+      # - WORKFLOW_AGENT_URL=http://workflow-agent:8001
+      # - AI_ASSISTANT_AGENT_URL=http://ai-assistant-agent:8002
+      # Remote AgentCore Runtime Configuration (from .env file)
+      - WORKFLOW_AGENT_RUNTIME_ARN=${WORKFLOW_AGENT_RUNTIME_ARN}
+      - AI_ASSISTANT_AGENT_RUNTIME_ARN=${AI_ASSISTANT_AGENT_RUNTIME_ARN}
+      - WORKFLOW_AGENT_ENDPOINT_NAME=${WORKFLOW_AGENT_ENDPOINT_NAME:-workflow-supervisor}
+      - AI_ASSISTANT_AGENT_ENDPOINT_NAME=${AI_ASSISTANT_AGENT_ENDPOINT_NAME:-ai-assistant-supervisor}
+      - AWS_REGION=${AWS_REGION:-ap-southeast-2}
+      # AWS Credentials (pass from host environment or .env file)
+      - AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID}
+      - AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY}
+      - AWS_SESSION_TOKEN=${AWS_SESSION_TOKEN}
+      # Polling for hot reload
       - WATCHPACK_POLLING=true
       - CHOKIDAR_USEPOLLING=true
     networks:
@@ -93,8 +107,125 @@ services:
       retries: 3
       start_period: 40s
 
+  # LocalStack for S3 (local AWS services)
+  localstack:
+    image: localstack/localstack:latest
+    container_name: bidopsai-localstack-dev
+    ports:
+      - "4566:4566"  # LocalStack gateway
+      - "4571:4571"  # LocalStack S3
+    environment:
+      - SERVICES=s3
+      - DEBUG=1
+      # Podman compatibility settings
+      - PERSISTENCE=1
+      - MAIN_CONTAINER_NAME=bidopsai-localstack-dev
+      - SKIP_INFRA_DOWNLOADS=1
+      - SKIP_SSL_CERT_DOWNLOAD=1
+      # Skip cleanup to avoid /tmp/localstack busy errors
+      - LOCALSTACK_VOLUME_DIR=/var/lib/localstack
+    volumes:
+      # Use /var/lib/localstack instead of /tmp for Podman
+      - localstack-data:/var/lib/localstack
+    networks:
+      - bidopsai-network
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:4566/_localstack/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Workflow Supervisor Agent
+  workflow-agent:
+    build:
+      context: ../../
+      dockerfile: infra/docker/agents-core/workflow/Dockerfile.dev
+    container_name: bidopsai-workflow-agent-dev
+    ports:
+      - "8001:8001"
+    volumes:
+      # Mount source code for hot reload
+      - ../../agents-core:/app
+      # Preserve Python cache and UV cache
+      - workflow-uv-cache:/root/.cache/uv
+      - workflow-pytest-cache:/app/.pytest_cache
+    env_file:
+      - ../../agents-core/.env.development
+    environment:
+      # Override database and S3 URLs for Docker network
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-bidopsai}:${POSTGRES_PASSWORD:-bidopsai_dev_password}@postgres:5432/${POSTGRES_DB:-bidopsai}
+      - S3_ENDPOINT_URL=http://localstack:4566
+      - WORKFLOW_HOST=0.0.0.0
+      - WORKFLOW_PORT=8001
+      - LOG_LEVEL=DEBUG
+      - UVICORN_RELOAD=true
+    networks:
+      - bidopsai-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8001/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # AI Assistant Supervisor Agent (Future)
+  ai-assistant-agent:
+    build:
+      context: ../../
+      dockerfile: infra/docker/agents-core/ai_assistant/Dockerfile.dev
+    container_name: bidopsai-ai-assistant-agent-dev
+    ports:
+      - "8002:8002"
+    volumes:
+      # Mount source code for hot reload
+      - ../../agents-core:/app
+      # Preserve Python cache and UV cache
+      - ai-assistant-uv-cache:/root/.cache/uv
+      - ai-assistant-pytest-cache:/app/.pytest_cache
+    env_file:
+      - ../../agents-core/.env.development
+    environment:
+      # Override database and S3 URLs for Docker network
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-bidopsai}:${POSTGRES_PASSWORD:-bidopsai_dev_password}@postgres:5432/${POSTGRES_DB:-bidopsai}
+      - S3_ENDPOINT_URL=http://localstack:4566
+      - AI_ASSISTANT_HOST=0.0.0.0
+      - AI_ASSISTANT_PORT=8002
+      - LOG_LEVEL=DEBUG
+      - UVICORN_RELOAD=true
+    networks:
+      - bidopsai-network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      localstack:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8002/ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
 volumes:
   postgres-data:
+    driver: local
+  localstack-data:
+    driver: local
+  workflow-uv-cache:
+    driver: local
+  workflow-pytest-cache:
+    driver: local
+  ai-assistant-uv-cache:
+    driver: local
+  ai-assistant-pytest-cache:
     driver: local
 
 networks:

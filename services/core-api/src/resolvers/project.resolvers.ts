@@ -586,6 +586,7 @@ export const projectResolvers = {
       return presignedUrls.map((url) => ({
         url: url.url,
         fileName: url.fileName,
+        key: url.key,
         expiresAt: url.expiresAt.toISOString(),
       }));
     },
@@ -791,6 +792,25 @@ export const projectResolvers = {
         where: { projectId: parent.id },
         orderBy: { startedAt: 'desc' },
         take: 10,
+      });
+    },
+  },
+
+  // ProjectDocument field resolvers
+  ProjectDocument: {
+    fileSize: (parent: any) => {
+      // Convert BigInt to number for GraphQL Int type
+      return typeof parent.fileSize === 'bigint'
+        ? Number(parent.fileSize)
+        : parent.fileSize;
+    },
+
+    uploadedBy: async (parent: any, _: any, context: GraphQLContext) => {
+      if (parent.uploader) {
+        return parent.uploader;
+      }
+      return context.prisma.user.findUnique({
+        where: { id: parent.uploadedBy },
       });
     },
   },

@@ -25,7 +25,7 @@ import { FileDropzone } from '@/components/common/FileUpload/FileDropzone';
 import { KnowledgeBaseSelector } from '@/components/projects/KnowledgeBaseSelector';
 import { UserSelector } from '@/components/projects/UserSelector';
 
-import { useCreateProject } from '@/hooks/mutations/useCreateProject';
+import { useCreateProject, useCreateProjectDocument } from '@/hooks/mutations';
 import { usePresignedUrl } from '@/hooks/mutations/usePresignedUrl';
 import { useFileUpload } from '@/hooks/useFileUpload';
 import { createProjectSchema, type CreateProjectFormData } from '@/lib/validations/project';
@@ -50,6 +50,7 @@ export default function NewProjectPage() {
 
   // Mutations
   const { mutateAsync: createProject, isPending: isCreatingProject } = useCreateProject();
+  const { mutateAsync: createProjectDocument, isPending: isCreatingDocument } = useCreateProjectDocument();
   const { mutateAsync: getPresignedUrls, isPending: isGettingUrls } = usePresignedUrl();
 
   // File upload hook
@@ -108,6 +109,40 @@ export default function NewProjectPage() {
         await uploadFiles(data.documents, presignedUrls);
 
         toast.success('Files uploaded successfully', { id: 'upload-files' });
+
+        // Step 3.5: Create database records for uploaded documents
+        toast.loading('Saving document records...', { id: 'save-docs' });
+        
+        try {
+          // Extract bucket name from first presigned URL
+          let bucketName = process.env.NEXT_PUBLIC_S3_PROJECT_DOCUMENTS_BUCKET;
+          if (!bucketName && presignedUrls.length > 0) {
+            // Extract bucket from presigned URL: https://{bucket}.s3.{region}.amazonaws.com/{key}
+            const urlMatch = presignedUrls[0].url.match(/https:\/\/([^.]+)\.s3\./);
+            bucketName = urlMatch ? urlMatch[1] : 'bidopsai-project-documents-dev-058264088919';
+          }
+          
+          // Create a database record for each uploaded file
+          for (let i = 0; i < data.documents.length; i++) {
+            const file = data.documents[i];
+            const presignedUrl = presignedUrls[i];
+            
+            await createProjectDocument({
+              projectId: project.id,
+              fileName: file.name,
+              filePath: presignedUrl.key || presignedUrl.fileName, // Use 'key' property which has the full S3 path
+              fileType: file.type,
+              fileSize: file.size,
+              rawFileLocation: `s3://${bucketName}/${presignedUrl.key || presignedUrl.fileName}`, // Full S3 URL with correct key
+            });
+          }
+          
+          toast.success('Document records saved', { id: 'save-docs' });
+        } catch (docError) {
+          console.error('Error saving document records:', docError);
+          toast.error('Failed to save document records', { id: 'save-docs' });
+          // Don't throw - files are uploaded, just log the error
+        }
       }
 
       // Step 4: Navigate to project detail page
@@ -122,7 +157,7 @@ export default function NewProjectPage() {
     }
   };
 
-  const isSubmitting = isCreatingProject || isGettingUrls || isUploading;
+  const isSubmitting = isCreatingProject || isGettingUrls || isUploading || isCreatingDocument;
 
   return (
     <div className="container mx-auto py-8 px-4 max-w-4xl">

@@ -52,6 +52,15 @@ export default function RootLayout({
                   document.documentElement.classList.add(fallback);
                   document.documentElement.setAttribute('data-theme', fallback);
                 }
+                
+                // Log agent mode configuration
+                const agentMode = '${process.env.NEXT_PUBLIC_AGENT_MODE || 'local'}';
+                const agentModeEmoji = agentMode === 'local' ? '🏠' : '☁️';
+                console.log('%c' + '='.repeat(60), 'color: #00ff00');
+                console.log('%c🤖 BIDOPS.AI - AGENT CONFIGURATION', 'color: #00ff00; font-weight: bold; font-size: 14px');
+                console.log('%c' + '='.repeat(60), 'color: #00ff00');
+                console.log('%cAgent Mode: %c' + agentModeEmoji + ' ' + agentMode.toUpperCase(), 'color: #888', 'color: #00ff00; font-weight: bold');
+                console.log('%c' + '='.repeat(60), 'color: #00ff00');
               })();
             `,
           }}
