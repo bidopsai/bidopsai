@@ -1,0 +1,3 @@
+[submodule "bidopsai-cdk"]
+	path = bidopsai-cdk
+	url = https://github.com/jerryyf/bidopsai-cdk.git
